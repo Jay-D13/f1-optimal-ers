@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from ..models import F1TrackModel
+from models import F1TrackModel
 
 
 def visualize_track(track_model: F1TrackModel, save_path: str = "../figures/track_analysis.png"):

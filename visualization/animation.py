@@ -1,7 +1,7 @@
 from typing import Dict
 import numpy as np
 
-from ..models import F1TrackModel
+from models import F1TrackModel
 
 
 def visualize_lap_animated(track_model: F1TrackModel, 

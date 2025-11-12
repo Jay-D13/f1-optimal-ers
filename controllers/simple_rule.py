@@ -1,7 +1,7 @@
 import numpy as np
 
 from .base import BaselineStrategy
-from ..models import TrackSegment
+from models import TrackSegment
 
 
 class SimpleRuleBasedStrategy(BaselineStrategy):

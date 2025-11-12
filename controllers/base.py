@@ -1,8 +1,8 @@
 import numpy as np
 from abc import ABC, abstractmethod
 
-from ..config import ERSConfig
-from ..models import TrackSegment
+from config import ERSConfig
+from models import TrackSegment
 
 
 class BaselineStrategy(ABC):

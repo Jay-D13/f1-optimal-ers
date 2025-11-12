@@ -2,7 +2,7 @@ import numpy as np
 import casadi as ca
 from typing import Tuple, Dict
 
-from ..models import VehicleDynamicsModel, F1TrackModel
+from models import VehicleDynamicsModel, F1TrackModel
 
 
 class ERSOptimalController:

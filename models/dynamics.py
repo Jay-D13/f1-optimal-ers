@@ -1,7 +1,7 @@
 import casadi as ca
 from typing import Dict
 
-from ..config import VehicleConfig, ERSConfig
+from config import VehicleConfig, ERSConfig
 
 
 class VehicleDynamicsModel:
@@ -13,23 +13,24 @@ class VehicleDynamicsModel:
         
     def create_casadi_function(self) -> ca.Function:
         """Create CasADi function for dynamics evaluation"""
-        # State variables
-        s = ca.MX.sym('s')
-        v = ca.MX.sym('v')
-        soc = ca.MX.sym('soc')
+        # States
+        s = ca.MX.sym('s')      # position along track
+        v = ca.MX.sym('v')      # velocity (m/s)
+        soc = ca.MX.sym('soc')  # battery state of charge (0..1)
         
         # Control variables
-        P_ers = ca.MX.sym('P_ers')
-        throttle = ca.MX.sym('throttle')
-        brake = ca.MX.sym('brake')
+        P_ers = ca.MX.sym('P_ers')  # W, ERS power (positive = deployment) (negative = harvest)
+        throttle = ca.MX.sym('throttle')  # throttle position [0, 1]
+        brake = ca.MX.sym('brake')  # brake force [0, 1]
         
-        # Parameters
+        # Parameters (track-dependent)
         gradient = ca.MX.sym('gradient')
         radius = ca.MX.sym('radius')
         
+        # --- Dynamics ---
         # Lateral acceleration limit (simplified)
         # v^2/r <= mu_lat * g * (1 + downforce_factor)
-        a_lat_max = 4.5 * 9.81  # 4.5g lateral (with downforce)
+        a_lat_max = 4.5 * 9.81  # g-limit; 4.5g lateral (with downforce)
 
         # Corner speed limit from lateral grip
         v_max_corner = ca.sqrt(a_lat_max * radius)
@@ -37,11 +38,14 @@ class VehicleDynamicsModel:
         # Limit velocity based on corner radius
         # For straights (large radius), this doesn't constrain
         # For corners, this enforces realistic speeds
-        v = ca.fmin(v, v_max_corner) # v constrained
+        v_eff = ca.fmin(v, v_max_corner) # v constrained
+        
+        rho = 1.225
+        A   = self.vehicle.frontal_area
         
         # Aerodynamic forces
-        F_drag = 0.5 * 1.225 * self.vehicle.cd * self.vehicle.frontal_area * v**2
-        F_downforce = 0.5 * 1.225 * self.vehicle.cl * self.vehicle.frontal_area * v**2
+        F_drag      = 0.5 * rho * self.vehicle.cd * A * v_eff**2
+        F_downforce = 0.5 * rho * self.vehicle.cl * A * v_eff**2
         
         # Normal force includes downforce
         F_normal = self.vehicle.mass * 9.81 * ca.cos(gradient) + F_downforce
@@ -67,9 +71,9 @@ class VehicleDynamicsModel:
         
         # Dynamics
         dv_dt = (F_traction - F_drag - F_rolling - F_gravity - F_brake) / self.vehicle.mass
-        ds_dt = v
+        ds_dt = v_eff  # Use effective velocity for position change
         
-        # Battery dynamics
+        # Battery dynamics: P_ers >0 deployment, <0 recovery
         # Slightly realistic recovery with diminishing returns at high power
         P_recovery_actual = ca.if_else(
             P_ers < 0,  # Recovery mode
@@ -84,8 +88,10 @@ class VehicleDynamicsModel:
         p = ca.vertcat(gradient, radius)
         x_dot = ca.vertcat(ds_dt, dv_dt, dsoc_dt)
         
-        dynamics_func = ca.Function('dynamics', [x, u, p], [x_dot], 
-                                   ['x', 'u', 'p'], ['x_dot'])
+        dynamics_func = ca.Function(
+            'dynamics', [x, u, p], [x_dot],
+            ['x', 'u', 'p'], ['x_dot']
+        )
         
         return dynamics_func
     
@@ -103,3 +109,4 @@ class VehicleDynamicsModel:
             'brake_min': 0,
             'brake_max': 1,
         }
+        

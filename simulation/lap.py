@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Dict
 
-from ..models import VehicleDynamicsModel, F1TrackModel
+from models import VehicleDynamicsModel, F1TrackModel
 
 
 class LapSimulator:
