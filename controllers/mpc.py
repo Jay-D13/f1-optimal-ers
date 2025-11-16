@@ -37,33 +37,47 @@ class ERSOptimalController:
         
         # Parameters (will be set at each MPC iteration)
         x0 = self.opti.parameter(3)  # Initial state
-        track_params = self.opti.parameter(2, self.N)  # Track parameters
+        self.track_params = self.opti.parameter(2, self.N)  # Track parameters
+        
+        w_progress = 1.0
+        q_soc = 1.0
+        r_u = 1e-4
+        r_du = 1e-2
         
         # Objective: Minimize lap time while managing energy
         obj = 0
         for k in range(self.N):
             # Maximize progress (minimize time)
             # Weight velocity instead of distance for smoother optimization
-            obj -= 5 * X[1, k]  # Maximize velocity (favors speed)
+            # obj -= 5 * X[1, k]  # Maximize velocity (favors speed)
+            
             
             # Deploying ERS at high speed is good (more gain)
-            ers_benefit = ca.fmax(0, U[0, k]) * X[1, k] / 50  # Normalized
-            obj -= 0.5 * ers_benefit
+            # ers_benefit = ca.fmax(0, U[0, k]) * X[1, k] / 50  # Normalized
+            # obj -= 0.5 * ers_benefit
             
             # Penalize battery depletion
-            target_soc = 0.5
-            obj += 5 * (X[2, k] - target_soc)**2
+            # target_soc = 0.5
+            # obj += 5 * (X[2, k] - target_soc)**2
             
             # Penalize excessive ERS switching (smoothness)
+            # if k > 0:
+            #     obj += 0.01 * (U[0, k] - U[0, k-1])**2
+            
+            obj += q_soc * (X[2, k] - 0.5)**2
+            obj += r_u * ca.sumsqr(U[:, k])
             if k > 0:
-                obj += 0.01 * (U[0, k] - U[0, k-1])**2
+                obj += r_du * (U[0,k] - U[0,k-1])**2
             
             # Small regularization on controls
             obj += 1e-5 * ca.sumsqr(U[:, k])
             
             # Soft penalty for SOC deviations from target (encourage energy neutrality)
-            target_soc = 0.5
-            obj += 0.1 * (X[2, k] - target_soc)**2
+            # target_soc = 0.5
+            # obj += 0.1 * (X[2, k] - target_soc)**2
+            
+        progress = X[0, self.N] - X[0, 0]
+        obj -= w_progress * progress
             
         self.opti.minimize(obj)
         
@@ -71,7 +85,7 @@ class ERSOptimalController:
         for k in range(self.N):
             x_k = X[:, k]
             u_k = U[:, k]
-            p_k = track_params[:, k]
+            p_k = self.track_params[:, k]
             
             # RK4 integration
             k1 = self.dynamics_func(x_k, u_k, p_k)
@@ -98,6 +112,21 @@ class ERSOptimalController:
             
             # Mutual exclusivity: throttle + brake <= 1 (can't do both)
             self.opti.subject_to(U[1, k] + U[2, k] <= 1.0)
+            
+            a_lat_max = 1.5 * 9.81
+            radius_k = self.track_params[1, k]
+
+            # Avoid division by zero and handle straights
+            v_corner_max = ca.sqrt(a_lat_max * radius_k)
+
+            # Limit to some global max (e.g. 100 m/s) to stay safe numerically
+            v_corner_max = ca.fmin(v_corner_max, constraints['v_max'])
+
+            # Enforce lateral constraint
+            self.opti.subject_to(X[1, k] <= v_corner_max)
+            
+            # v_corner_max_k = track_params[1,k]  # now parameter is v_max, not radius
+            # self.opti.subject_to(X[1,k] <= v_corner_max_k)
             
             # State constraints with some margin for numerical stability
             self.opti.subject_to(self.opti.bounded(
@@ -128,7 +157,7 @@ class ERSOptimalController:
         self.X = X
         self.U = U
         self.x0_param = x0
-        self.track_params = track_params
+        # self.track_params = track_params
         
     def solve_mpc_step(self, current_state: np.ndarray, 
                        track_position: float) -> Tuple[np.ndarray, Dict]:

@@ -30,7 +30,7 @@ class VehicleDynamicsModel:
         # --- Dynamics ---
         # Lateral acceleration limit (simplified)
         # v^2/r <= mu_lat * g * (1 + downforce_factor)
-        a_lat_max = 4.5 * 9.81  # g-limit; 4.5g lateral (with downforce)
+        a_lat_max = 1.5 * 9.81  # g-limit; 4.5g lateral (with downforce)
 
         # Corner speed limit from lateral grip
         v_max_corner = ca.sqrt(a_lat_max * radius)
@@ -38,14 +38,14 @@ class VehicleDynamicsModel:
         # Limit velocity based on corner radius
         # For straights (large radius), this doesn't constrain
         # For corners, this enforces realistic speeds
-        v_eff = ca.fmin(v, v_max_corner) # v constrained
+        # v_eff = ca.fmin(v, v_max_corner) # v constrained
         
         rho = 1.225
         A   = self.vehicle.frontal_area
         
         # Aerodynamic forces
-        F_drag      = 0.5 * rho * self.vehicle.cd * A * v_eff**2
-        F_downforce = 0.5 * rho * self.vehicle.cl * A * v_eff**2
+        F_drag      = 0.5 * rho * self.vehicle.cd * A * v**2
+        F_downforce = 0.5 * rho * self.vehicle.cl * A * v**2
         
         # Normal force includes downforce
         F_normal = self.vehicle.mass * 9.81 * ca.cos(gradient) + F_downforce
@@ -71,16 +71,16 @@ class VehicleDynamicsModel:
         
         # Dynamics
         dv_dt = (F_traction - F_drag - F_rolling - F_gravity - F_brake) / self.vehicle.mass
-        ds_dt = v_eff  # Use effective velocity for position change
+        ds_dt = v  # Use effective velocity for position change
         
         # Battery dynamics: P_ers >0 deployment, <0 recovery
         # Slightly realistic recovery with diminishing returns at high power
-        P_recovery_actual = ca.if_else(
-            P_ers < 0,  # Recovery mode
-            P_ers * self.ers.recovery_efficiency * (1 - 0.1 * ca.fabs(P_ers / self.ers.max_recovery_power)),
-            -P_ers / self.ers.deployment_efficiency
+        P_batt = ca.if_else(
+            P_ers >= 0,    # deployment (discharge)
+            P_ers / self.ers.deployment_efficiency,
+            P_ers * self.ers.recovery_efficiency   # P_ers is negative → this is negative
         )
-        dsoc_dt = P_recovery_actual / self.ers.battery_capacity
+        dsoc_dt = P_batt / self.ers.battery_capacity
         
         # Create function
         x = ca.vertcat(s, v, soc)

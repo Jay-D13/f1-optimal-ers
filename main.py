@@ -18,10 +18,10 @@ def main():
     vehicle_config = VehicleConfig()
     
     print("\n1. Loading track data...")
-    track = F1TrackModel(2023, 'Monaco', 'Q')
+    track = F1TrackModel(2025, 'Monaco', 'Q')
     
     try:
-        track.load_from_fastf1('VER')
+        track.load_from_fastf1('NOR')
         print("   ✓ Loaded real track data from FastF1")
         
         print("\n   Generating track visualization...")
