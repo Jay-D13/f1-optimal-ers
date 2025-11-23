@@ -1,3 +1,4 @@
+from cmath import sqrt
 import numpy as np
 import casadi as ca
 from typing import Tuple, Dict
@@ -10,7 +11,7 @@ class ERSOptimalController:
     
     def __init__(self, vehicle_model: VehicleDynamicsModel, 
                  track_model: F1TrackModel,
-                 horizon_time: float = 3.0,  # Reduced from 5.0 for faster solves
+                 horizon_time: float = 3.0,
                  dt: float = 0.1):
         self.vehicle_model = vehicle_model
         self.track_model = track_model
@@ -24,112 +25,115 @@ class ERSOptimalController:
         self.failed_solves = 0  # Track consecutive failures
         
     def setup_optimization(self):
-        """Setup the CasADi optimization problem"""
+        """Setup the CasADi optimization problem with Lateral G constraints"""
         self.opti = ca.Opti()
         
-        # Get dynamics function and constraints
+        # 1. Get dynamics and basic constraints
         self.dynamics_func = self.vehicle_model.create_casadi_function()
         constraints = self.vehicle_model.get_constraints()
         
-        # Decision variables (using Opti stack variables)
-        X = self.opti.variable(3, self.N+1)  # States over horizon
-        U = self.opti.variable(3, self.N)    # Controls over horizon
+        # 2. Decision variables
+        X = self.opti.variable(3, self.N+1)  # States: [pos, vel, soc]
+        U = self.opti.variable(3, self.N)    # Controls: [P_ers, throttle, brake]
         
-        # Parameters (will be set at each MPC iteration)
+        # 3. Parameters
         x0 = self.opti.parameter(3)  # Initial state
-        track_params = self.opti.parameter(2, self.N)  # Track parameters
+        track_params = self.opti.parameter(2, self.N)  # [gradient, radius]
         
-        # Objective: Minimize lap time while managing energy
+        # 4. Objective Function Setup
         obj = 0
-        for k in range(self.N):
-            # Maximize progress (minimize time)
-            # Weight velocity instead of distance for smoother optimization
-            obj -= 5 * X[1, k]  # Maximize velocity (favors speed)
-            
-            # Deploying ERS at high speed is good (more gain)
-            ers_benefit = ca.fmax(0, U[0, k]) * X[1, k] / 50  # Normalized
-            obj -= 0.5 * ers_benefit
-            
-            # Penalize battery depletion
-            target_soc = 0.5
-            obj += 5 * (X[2, k] - target_soc)**2
-            
-            # Penalize excessive ERS switching (smoothness)
-            if k > 0:
-                obj += 0.01 * (U[0, k] - U[0, k-1])**2
-            
-            # Small regularization on controls
-            obj += 1e-5 * ca.sumsqr(U[:, k])
-            
-            # Soft penalty for SOC deviations from target (encourage energy neutrality)
-            target_soc = 0.5
-            obj += 0.1 * (X[2, k] - target_soc)**2
-            
-        self.opti.minimize(obj)
         
-        # Dynamic constraints using RK4 integration
+        # Constants for weights (tuning knobs)
+        W_progress = 10.0      # Weight for maximizing velocity
+        W_energy_diff = 50.0   # Weight for keeping SOC near target
+        W_smooth = 0.1         # Weight for smooth control changes
+        
+        # Lateral physics constants
+        mu_lat = 1.8  # Max lateral friction coefficient (Dry F1 tires)
+        g = 9.81
+        
         for k in range(self.N):
+            # --- Cost: Maximize Velocity (Progress) ---
+            obj -= W_progress * X[1, k]
+            
+            # --- Cost: Energy Management ---
+            # Instead of a hard target of 0.5, we penalize being empty
+            # and gently encourage staying in the middle.
+            # This allows the car to use energy when needed.
+            soc_deviation = (X[2, k] - 0.5)
+            obj += W_energy_diff * soc_deviation**2
+            
+            # --- Cost: Smoothness ---
+            if k > 0:
+                # Penalize rapid changes in ERS and Throttle
+                obj += W_smooth * (U[0, k] - U[0, k-1])**2 
+                obj += W_smooth * (U[1, k] - U[1, k-1])**2
+            
+            # --- Constraint: The "Friction Circle" (The Fix) ---
+            # Calculate max speed allowed by corner radius: v_max = sqrt(mu * g * R)
+            
+            # 1. Get radius, ensuring we handle straight lines (Inf) safely
+            # We treat any radius > 2000m as effectively straight for grip purposes
+            r_k = track_params[1, k]
+            safe_r = ca.fmin(r_k, 2000.0) 
+            
+            # 2. Calculate the physical speed limit for this segment
+            # v^2 / R <= mu * g  ->  v <= sqrt(mu * g * R)
+            v_max_corner = ca.sqrt(mu_lat * g * safe_r)
+            
+            # 3. Apply as a constraint
+            # We use fmin so the limit is never higher than the car's mechanical max speed
+            limit = ca.fmin(v_max_corner, constraints['v_max'])
+            self.opti.subject_to(X[1, k] <= limit)
+            
+            # --- Dynamics Integration (RK4) ---
             x_k = X[:, k]
             u_k = U[:, k]
             p_k = track_params[:, k]
             
-            # RK4 integration
             k1 = self.dynamics_func(x_k, u_k, p_k)
             k2 = self.dynamics_func(x_k + self.dt/2 * k1, u_k, p_k)
             k3 = self.dynamics_func(x_k + self.dt/2 * k2, u_k, p_k)
             k4 = self.dynamics_func(x_k + self.dt * k3, u_k, p_k)
-            
             x_next = x_k + self.dt/6 * (k1 + 2*k2 + 2*k3 + k4)
             
             self.opti.subject_to(X[:, k+1] == x_next)
             
-        # Initial condition
-        self.opti.subject_to(X[:, 0] == x0)
+            # --- Actuator Constraints ---
+            self.opti.subject_to(self.opti.bounded(constraints['P_ers_min'], U[0, k], constraints['P_ers_max']))
+            self.opti.subject_to(self.opti.bounded(constraints['throttle_min'], U[1, k], constraints['throttle_max']))
+            self.opti.subject_to(self.opti.bounded(constraints['brake_min'], U[2, k], constraints['brake_max']))
+            
+            # No simultaneous throttle and brake
+            self.opti.subject_to(U[1, k] * U[2, k] <= 1e-4)
+            
+        # 5. Boundary Conditions
+        self.opti.subject_to(X[:, 0] == x0) # Initial state
         
-        # Path constraints
-        for k in range(self.N):
-            # Control constraints
-            self.opti.subject_to(self.opti.bounded(
-                constraints['P_ers_min'], U[0, k], constraints['P_ers_max']))
-            self.opti.subject_to(self.opti.bounded(
-                constraints['throttle_min'], U[1, k], constraints['throttle_max']))
-            self.opti.subject_to(self.opti.bounded(
-                constraints['brake_min'], U[2, k], constraints['brake_max']))
-            
-            # Mutual exclusivity: throttle + brake <= 1 (can't do both)
-            self.opti.subject_to(U[1, k] + U[2, k] <= 1.0)
-            
-            # State constraints with some margin for numerical stability
-            self.opti.subject_to(self.opti.bounded(
-                constraints['v_min'], X[1, k], constraints['v_max']))
-            self.opti.subject_to(self.opti.bounded(
-                constraints['soc_min'], X[2, k], constraints['soc_max']))
-            
-        # Terminal state constraints
-        self.opti.subject_to(self.opti.bounded(
-            constraints['soc_min'], X[2, -1], constraints['soc_max']))
+        # Terminal Constraints (Safety)
+        # Ensure we don't end the horizon with an empty battery
+        self.opti.subject_to(X[2, -1] >= 0.2) 
         
-        # Improved solver options for robustness
+        self.opti.minimize(obj)
+        
+        # 6. Solver Settings
         opts = {
-            'ipopt.max_iter': 300,  # Increased from 200
+            'ipopt.max_iter': 500,
             'ipopt.print_level': 0,
             'print_time': 0,
-            'ipopt.acceptable_tol': 1e-5,  # Relaxed from 1e-6
-            'ipopt.acceptable_obj_change_tol': 1e-5,  # Relaxed from 1e-6
-            'ipopt.acceptable_iter': 10,  # Accept solution after 10 acceptable iterations
-            'ipopt.mu_strategy': 'adaptive',  # Better barrier parameter update
-            'ipopt.warm_start_init_point': 'yes',  # Enable warm starting
-            'ipopt.warm_start_bound_push': 1e-9,
-            'ipopt.warm_start_mult_bound_push': 1e-9,
+            'ipopt.acceptable_tol': 1e-4,
+            'ipopt.acceptable_obj_change_tol': 1e-4,
+            'ipopt.tol': 1e-4,
+            'ipopt.warm_start_init_point': 'yes'
         }
         self.opti.solver('ipopt', opts)
         
-        # Store variables for later use
+        # Save references
         self.X = X
         self.U = U
         self.x0_param = x0
         self.track_params = track_params
-        
+          
     def solve_mpc_step(self, current_state: np.ndarray, 
                        track_position: float) -> Tuple[np.ndarray, Dict]:
         """Solve one MPC iteration"""
@@ -256,3 +260,4 @@ class ERSOptimalController:
                 track_data[1, i] = 10000.0
             
         return track_data
+    

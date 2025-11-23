@@ -23,3 +23,7 @@ class VehicleConfig:
     def for_monza(cls):
         return cls(cd=0.7, cl=2.0)
     
+    @classmethod
+    def for_spa(cls):
+        return cls(cd=0.85, cl=2.5) # (autocompleted for later) idk how accurate this is lmao
+    

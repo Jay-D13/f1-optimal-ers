@@ -42,3 +42,4 @@ class SimpleRuleBasedStrategy(BaselineStrategy):
             throttle = 0.7
             
         return np.array([P_ers, throttle, brake])
+    

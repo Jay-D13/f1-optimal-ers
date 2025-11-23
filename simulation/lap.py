@@ -51,7 +51,7 @@ class LapSimulator:
             state = state + x_dot * dt
             
             # Apply state constraints
-            state[1] = np.clip(state[1], 0, 100)  # Velocity limits
+            state[1] = np.clip(state[1], 5, 95)  # Velocity limits
             state[2] = np.clip(state[2], 0.1, 0.9)  # SOC limits (respect battery health)
             
             # Update segment index based on distance traveled
@@ -74,3 +74,4 @@ class LapSimulator:
             'final_soc': state[2],
             'completed': lap_complete
         }
+        

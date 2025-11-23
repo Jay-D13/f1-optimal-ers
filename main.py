@@ -4,8 +4,11 @@ from controllers import ERSOptimalController, SimpleRuleBasedStrategy
 from simulation import LapSimulator
 from visualization.results_viz import plot_results
 from visualization.animation import visualize_lap_animated
+from visualization.track_viz import visualize_track
+
 import numpy as np
 import matplotlib.pyplot as plt
+
 
 def main():
     """Main execution function"""
@@ -15,22 +18,23 @@ def main():
     
     # Initialize configurations
     ers_config = ERSConfig()
-    vehicle_config = VehicleConfig()
+    vehicle_config = VehicleConfig().for_monaco()
     
     print("\n1. Loading track data...")
-    track = F1TrackModel(2023, 'Monaco', 'Q')
+    track_name = 'Monaco'
+    track = F1TrackModel(2023, track_name, 'Q')
     
-    try:
-        track.load_from_fastf1('VER')
-        print("   ✓ Loaded real track data from FastF1")
+    # try:
+    track.load_from_fastf1('VER') # DU DU DU DUUU MAX VERSTAPPEN
+    print("   ✓ Loaded real track data from FastF1")
+    
+    print("\n   Generating track visualization...")
+    visualize_track(track,f'{track_name.lower()}_analysis.png')
         
-        print("\n   Generating track visualization...")
-        track.visualize_track('track_analysis.png')
-        
-    except Exception as e:
-        print(f"   ⚠ Error: {e}")
-        track.create_synthetic_track()
-        print("   ✓ Created synthetic Monaco track")
+    # except Exception as e:
+    #     print(f"   ⚠ Error: {e}")
+        # track.create_synthetic_track()
+        # print("   ✓ Created synthetic Monaco track")
     
     print(f"   Track length: {track.total_length:.0f}m")
     print(f"   Number of segments: {len(track.segments)}")
@@ -145,12 +149,12 @@ if __name__ == "__main__":
     # lap = session.laps.pick_fastest()
     # telemetry = lap.get_telemetry()
 
-    # What's in the telemetry DataFrame:
+    # # What's in the telemetry DataFrame:
     # print(telemetry.columns)
-    # Output: ['Time', 'DriverAhead', 'DistanceToDriverAhead', 'Date', 
-    #          'RPM', 'Speed', 'nGear', 'Throttle', 'Brake', 'DRS',
-    #          'X', 'Y', 'Z', 'Status', 'Distance', ...]
+    # # Output: ['Time', 'DriverAhead', 'DistanceToDriverAhead', 'Date', 
+    # #          'RPM', 'Speed', 'nGear', 'Throttle', 'Brake', 'DRS',
+    # #          'X', 'Y', 'Z', 'Status', 'Distance', ...]
     
-    # x,y,z for track shape
+    # # x,y,z for track shape
     
     main()

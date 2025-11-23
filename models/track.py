@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+import fastf1 as ff1
 from dataclasses import dataclass
 from typing import List, Optional
+from scipy.signal import savgol_filter
 
 @dataclass
 class TrackSegment:
@@ -10,7 +12,7 @@ class TrackSegment:
     radius: float          # meters (inf for straight)
     gradient: float        # radians
     speed_limit: float     # m/s (from track limits/safety)
-    sector: int           # DRS zones, etc.
+    sector: int            # sector number (1, 2, or 3)
     
     @property
     def is_straight(self) -> bool:
@@ -36,39 +38,25 @@ class F1TrackModel:
         
     def load_from_fastf1(self, driver: Optional[str] = None):
         """Load track data from FastF1 API"""
-        try:
-            import fastf1
-            from scipy.signal import savgol_filter
-            
-            session = fastf1.get_session(self.year, self.gp, self.session_type)
-            session.load()
-            
-            if driver:
-                lap = session.laps.pick_driver(driver).pick_fastest()
-            else:
-                lap = session.laps.pick_fastest()
-                
-            telemetry = lap.get_telemetry()
-            self.telemetry_data = telemetry  # Store for visualization
-            
-            # Process telemetry to extract track characteristics
-            self._process_telemetry_improved(telemetry)
-            
-            print(f"   Processed {len(self.segments)} track segments")
-            
-        except ImportError:
-            print("FastF1 not available, using synthetic track data")
-            self.create_synthetic_track()
-        except Exception as e:
-            print(f"Error loading FastF1 data: {e}")
-            print("Falling back to synthetic track")
-            self.create_synthetic_track()
-    
-    def _process_telemetry_improved(self, telemetry: pd.DataFrame):
-        """Convert telemetry to track segments with real curvature"""
-        import numpy as np
-        from scipy.signal import savgol_filter
         
+        session = ff1.get_session(self.year, self.gp, self.session_type)
+        session.load()
+        
+        if driver:
+            lap = session.laps.pick_driver(driver).pick_fastest()
+        else:
+            lap = session.laps.pick_fastest()
+            
+        telemetry = lap.get_telemetry()
+        self.telemetry_data = telemetry  # Store for visualization
+        
+        # Process telemetry to extract track characteristics
+        self._process_telemetry(telemetry)
+        
+        print(f"   Processed {len(self.segments)} track segments")
+    
+    def _process_telemetry(self, telemetry: pd.DataFrame):
+        """Convert telemetry to track segments with real curvature"""        
         # Extract data
         x = telemetry['X'].values
         y = telemetry['Y'].values
@@ -132,6 +120,7 @@ class F1TrackModel:
             # Average properties over segment
             segment_radius = np.mean(radius[mask])
             segment_speed = np.mean(speeds[mask])
+            print(segment_speed)
             
             # Create segment
             seg = TrackSegment(
@@ -159,85 +148,4 @@ class F1TrackModel:
         # Monaco has 3 sectors (approximate thirds)
         sector_length = self.total_length / 3
         return min(int(distance / sector_length) + 1, 3)
-    
-    def visualize_track(self, save_path: str = None):
-        """Visualize the track layout and properties"""
-        if self.telemetry_data is None:
-            print("No telemetry data available for visualization")
-            return
-        
-        import matplotlib.pyplot as plt
-        
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        
-        x = self.telemetry_data['X'].values
-        y = self.telemetry_data['Y'].values
-        speeds = self.telemetry_data['Speed'].values
-        distances = self.telemetry_data['Distance'].values
-        
-        # Plot 1: Track layout colored by speed
-        ax = axes[0, 0]
-        scatter = ax.scatter(x, y, c=speeds, cmap='RdYlGn', s=1, alpha=0.6)
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_title('Track Layout (colored by speed)')
-        ax.set_aspect('equal')
-        plt.colorbar(scatter, ax=ax, label='Speed (km/h)')
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 2: Track layout colored by segment radius
-        ax = axes[0, 1]
-        segment_distances = np.array([sum(seg.length for seg in self.segments[:i]) 
-                                     for i in range(len(self.segments))])
-        segment_radii = np.array([seg.radius for seg in self.segments])
-        
-        # Map segment radii to telemetry points
-        radii_at_points = np.interp(distances, segment_distances, segment_radii)
-        
-        scatter = ax.scatter(x, y, c=np.log10(radii_at_points), 
-                           cmap='coolwarm', s=1, alpha=0.6, vmin=1, vmax=4)
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_title('Track Layout (colored by corner radius)')
-        ax.set_aspect('equal')
-        cbar = plt.colorbar(scatter, ax=ax, label='log10(Radius (m))')
-        cbar.ax.set_yticklabels(['10m', '100m', '1km', '10km'])
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 3: Speed profile vs distance
-        ax = axes[1, 0]
-        ax.plot(distances, speeds, 'b-', linewidth=1, alpha=0.7)
-        ax.set_xlabel('Distance (m)')
-        ax.set_ylabel('Speed (km/h)')
-        ax.set_title('Speed Profile')
-        ax.grid(True, alpha=0.3)
-        
-        # Highlight corners
-        for seg in self.segments:
-            if seg.radius < 100:  # Tight corners
-                seg_start = sum(s.length for s in self.segments[:self.segments.index(seg)])
-                ax.axvspan(seg_start, seg_start + seg.length, 
-                          alpha=0.1, color='red', label='Hairpin' if seg == self.segments[0] else '')
-        
-        # Plot 4: Radius vs distance
-        ax = axes[1, 1]
-        ax.plot(segment_distances, segment_radii, 'r-', linewidth=2)
-        ax.set_xlabel('Distance (m)')
-        ax.set_ylabel('Corner Radius (m)')
-        ax.set_title('Track Curvature')
-        ax.set_ylim([0, 1000])
-        ax.axhline(y=100, color='k', linestyle='--', alpha=0.3, label='Slow corner')
-        ax.axhline(y=500, color='k', linestyle=':', alpha=0.3, label='Fast corner')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        plt.suptitle(f'Track Analysis: {self.year} {self.gp}', 
-                    fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Track visualization saved to {save_path}")
-        
-        return fig
     
