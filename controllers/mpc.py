@@ -11,7 +11,7 @@ class ERSOptimalController:
     
     def __init__(self, vehicle_model: VehicleDynamicsModel, 
                  track_model: F1TrackModel,
-                 horizon_time: float = 3.0,
+                 horizon_time: float = 5.0,
                  dt: float = 0.1):
         self.vehicle_model = vehicle_model
         self.track_model = track_model
@@ -31,6 +31,8 @@ class ERSOptimalController:
         # 1. Get dynamics and basic constraints
         self.dynamics_func = self.vehicle_model.create_casadi_function()
         constraints = self.vehicle_model.get_constraints()
+        
+        self.soc_target_param = self.opti.parameter(self.N)
         
         # 2. Decision variables
         X = self.opti.variable(3, self.N+1)  # States: [pos, vel, soc]
@@ -60,7 +62,7 @@ class ERSOptimalController:
             # Instead of a hard target of 0.5, we penalize being empty
             # and gently encourage staying in the middle.
             # This allows the car to use energy when needed.
-            soc_deviation = (X[2, k] - 0.5)
+            soc_deviation = (X[2, k] - self.soc_target_param[k]) 
             obj += W_energy_diff * soc_deviation**2
             
             # --- Cost: Smoothness ---
@@ -118,7 +120,7 @@ class ERSOptimalController:
         
         # 6. Solver Settings
         opts = {
-            'ipopt.max_iter': 500,
+            'ipopt.max_iter': 250,
             'ipopt.print_level': 0,
             'print_time': 0,
             'ipopt.acceptable_tol': 1e-4,
@@ -133,9 +135,13 @@ class ERSOptimalController:
         self.U = U
         self.x0_param = x0
         self.track_params = track_params
+        self.soc_target_param = self.soc_target_param
           
-    def solve_mpc_step(self, current_state: np.ndarray, 
-                       track_position: float) -> Tuple[np.ndarray, Dict]:
+    def solve_mpc_step(self, 
+                       current_state: np.ndarray, 
+                       track_position: float,
+                       soc_reference_trajectory: np.ndarray = None
+                       ) -> Tuple[np.ndarray, Dict]:
         """Solve one MPC iteration"""
         # Set current state
         self.opti.set_value(self.x0_param, current_state)
@@ -143,6 +149,16 @@ class ERSOptimalController:
         # Set track parameters for horizon
         track_data = self._get_track_preview(track_position, current_state[1])
         self.opti.set_value(self.track_params, track_data)
+        
+        if soc_reference_trajectory is not None:
+            if len(soc_reference_trajectory) != self.N:
+                ref = np.resize(soc_reference_trajectory, self.N)
+            else:
+                ref = soc_reference_trajectory
+            
+            self.opti.set_value(self.soc_target_param, ref)
+        else:
+            self.opti.set_value(self.soc_target_param, np.full(self.N, 0.5))
         
         # Warm start from previous solution if available
         if self.solution is not None:
