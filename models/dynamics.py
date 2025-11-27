@@ -1,3 +1,4 @@
+import numpy as np
 import casadi as ca
 from typing import Dict
 
@@ -11,103 +12,303 @@ class VehicleDynamicsModel:
         self.vehicle = vehicle_config
         self.ers = ers_config
         
-    def create_casadi_function(self) -> ca.Function:
-        """Create CasADi function for dynamics evaluation"""
+        # cache for CasADi functions
+        self._dynamics_time_func = None
+        self._dynamics_spatial_func = None
+        
+    def create_time_domain_dynamics(self) -> ca.Function:
+        """
+        Create CasADi functions for time-domain dynamics (dx/dt).
+        
+        State: x = [s, v, soc]
+            s: position along track (m)
+            v: velocity (m/s)
+            soc: battery state of charge (0-1)
+        
+        Control: u = [P_ers, throttle, brake]
+            P_ers: ERS power (W), positive = deployment
+            throttle: throttle position (0-1)
+            brake: brake force fraction (0-1)
+        
+        Parameters: p = [gradient, radius]
+            gradient: road gradient (radians)
+            radius: corner radius (m)
+        
+        Returns:
+            CasADi Function: dynamics(x, u, p) -> x_dot
+        """
+        
+        if self._dynamics_time_func is not None:
+            return self._dynamics_time_func
+        
+        # === Symbolic Variables ===
         # States
-        s = ca.MX.sym('s')      # position along track
-        v = ca.MX.sym('v')      # velocity (m/s)
-        soc = ca.MX.sym('soc')  # battery state of charge (0..1)
+        s = ca.MX.sym('s')          # Position (m)
+        v = ca.MX.sym('v')          # Velocity (m/s)
+        soc = ca.MX.sym('soc')      # State of charge (0-1)
         
-        # Control variables
-        P_ers = ca.MX.sym('P_ers')  # W, ERS power (positive = deployment) (negative = harvest)
-        throttle = ca.MX.sym('throttle')  # throttle position [0, 1]
-        brake = ca.MX.sym('brake')  # brake force [0, 1]
+        # Controls
+        P_ers = ca.MX.sym('P_ers')      # ERS power (W)
+        throttle = ca.MX.sym('throttle') # Throttle (0-1)
+        brake = ca.MX.sym('brake')       # Brake (0-1)
         
-        # Parameters (track-dependent)
-        gradient = ca.MX.sym('gradient')
-        radius = ca.MX.sym('radius')
-                
-        # Physical constants
-        rho = 1.225  # Air density
+        # Parameters
+        gradient = ca.MX.sym('gradient')  # Road gradient (rad)
+        radius = ca.MX.sym('radius')      # Corner radius (m)
+        
+        # === Physical Constants ===
+        g = self.vehicle.g
+        rho = self.vehicle.rho_air
         A = self.vehicle.frontal_area
+        m = self.vehicle.mass
         
-        # Aerodynamic forces
-        F_drag      = 0.5 * rho * self.vehicle.cd * A * v**2
-        F_downforce = 0.5 * rho * self.vehicle.cl * A * v**2
-        F_gravity   = self.vehicle.mass * 9.81 * ca.sin(gradient)
+        # === Aerodynamic Forces ===
+        q = 0.5 * rho * v**2  # Dynamic pressure
         
-        # Normal force includes downforce
-        F_normal = self.vehicle.mass * 9.81 * ca.cos(gradient) + F_downforce
+        F_drag = q * self.vehicle.cd * A
+        F_downforce = q * self.vehicle.cl * A
+        
+        # === Gravitational Force Component ===
+        F_gravity = m * g * ca.sin(gradient)
+        
+        # === Normal Force (weight + downforce) ===
+        F_normal = m * g * ca.cos(gradient) + F_downforce
+        
+        # === Rolling Resistance ===
         F_rolling = self.vehicle.cr * F_normal
         
-        # Maximum traction force (simplified)
-        mu = 1.8  # Peak tire coefficient (dry slicks)
-        F_total_max = mu * F_normal # Total tyre force limit from friction
+        # === Friction Circle ===
+        # Total available tire force
+        mu = self.vehicle.mu_lateral
+        F_tire_max = mu * F_normal
+
+        # Lateral force from cornering (v²/R)
+        safe_radius = ca.fmax(radius, 10.0)  # Prevent div by zero
+        a_lateral = v**2 / safe_radius
+        F_lateral = m * a_lateral
+
+        # Remaining force for longitudinal (friction circle)
+        # F_long² + F_lat² <= F_max²
+        # F_long_available = sqrt(F_max² - F_lat²)
+        # Add extra margin to prevent negative values under sqrt
+        grip_margin_sq = F_tire_max**2 - F_lateral**2
+        # Soft limit to avoid sudden gradient change
+        grip_margin_sq_safe = ca.fmax(grip_margin_sq, 100.0)  # Min 10N available force
+        F_long_available = ca.sqrt(grip_margin_sq_safe)
         
-        # Lateral acceleration from curvature (avoid div by zero / inf)
-        # Treat radius <= 0 or very large as "straight"
-        safe_radius = ca.fmax(radius, 1.0)
-        a_lat = v**2 / safe_radius             # [m/s^2]
-        F_lat = self.vehicle.mass * a_lat      # lateral tyre force
-
-        # Remaining longitudinal force from friction circle
-        # Protected against Sqrt(0) singularity
-        # We clamp the "grip remaining" so it never drops below a tiny epsilon (1.0 N)
-        # This prevents the gradient from exploding to Infinity.
-        grip_remaining_sq = ca.fmax(F_total_max**2 - F_lat**2, 1.0)
-        F_long_abs_max = ca.sqrt(grip_remaining_sq)
-
-        # Longitudinal traction / braking limited by remaining grip
+        # === Powertrain Forces ===
+        # ICE power
         P_ice = throttle * self.vehicle.max_ice_power
-        P_total = P_ice + ca.fmax(0, P_ers)
         
-        # Protect against v=0 division
-        F_traction_requested = P_total / ca.fmax(v, 1.0)
-        F_traction = ca.fmin(F_traction_requested, F_long_abs_max)
-
-        F_brake_requested = brake * self.vehicle.max_brake_force
-        F_brake = ca.fmin(F_brake_requested, F_long_abs_max)
-
-        # --- Dynamics ---
-        dv_dt = (F_traction - F_drag - F_rolling - F_gravity - F_brake) / self.vehicle.mass
+        # Total propulsive power (ICE + ERS deployment)
+        # P_ers > 0 means deployment (adds to propulsion)
+        P_propulsion = P_ice + ca.fmax(P_ers, 0)
+        
+        # Traction force (limited by power and grip)
+        v_safe = ca.fmax(v, 1.0)  # Prevent div by zero
+        F_traction_request = P_propulsion / v_safe
+        F_traction = ca.fmin(F_traction_request, F_long_available)
+        
+        # === Braking Forces ===
+        # Mechanical braking
+        F_brake_mech = brake * self.vehicle.max_brake_force
+        
+        # ERS recovery (regenerative braking)
+        # P_ers < 0 means recovery (acts as additional braking)
+        P_regen = ca.fmin(P_ers, 0)  # Negative or zero
+        F_brake_regen = -P_regen / v_safe  # Convert power to force (positive)
+        
+        # Total braking (limited by grip)
+        F_brake_total = ca.fmin(F_brake_mech + F_brake_regen, F_long_available)
+        
+        # === Equations of Motion ===
+        # ds/dt = v
         ds_dt = v
         
-        # Battery dynamics: 
-        # P_ers > 0: Deployment (Energy flows OUT of battery)
-        # P_ers < 0: Recovery (Energy flows INTO battery)
+        # dv/dt = (F_traction - F_drag - F_rolling - F_gravity - F_brake) / m
+        F_net = F_traction - F_drag - F_rolling - F_gravity - F_brake_total
+        dv_dt = F_net / m
         
-        P_internal = ca.if_else(
-            P_ers < 0,  # Recovery mode
-            P_ers * self.ers.recovery_efficiency, # e.g. -100kW * 0.85 = -85kW (Internal gain)
-            P_ers / self.ers.deployment_efficiency # e.g. 100kW / 0.95 = 105kW (Internal cost)
+        # === Battery Dynamics ===
+        # CRITICAL: Sign convention
+        # - P_ers > 0: Deployment -> battery LOSES energy -> SOC DECREASES
+        # - P_ers < 0: Recovery -> battery GAINS energy -> SOC INCREASES
+        #
+        # Power at battery terminals (accounting for efficiency):
+        # - Deployment: P_battery = P_ers / η_deploy (more internal loss)
+        # - Recovery: P_battery = P_ers * η_recover (less recovered)
+        
+        P_battery = ca.if_else(
+            P_ers >= 0,
+            P_ers / self.ers.deployment_efficiency,   # Deployment: divide
+            P_ers * self.ers.recovery_efficiency      # Recovery: multiply
         )
-        dsoc_dt = P_internal / self.ers.battery_capacity
         
-        # Create function
+        # dsoc/dt = -P_battery / E_capacity
+        # Negative because P_battery > 0 means energy leaving battery
+        dsoc_dt = -P_battery / self.ers.battery_capacity
+        
+        # === Create Function ===
         x = ca.vertcat(s, v, soc)
         u = ca.vertcat(P_ers, throttle, brake)
         p = ca.vertcat(gradient, radius)
         x_dot = ca.vertcat(ds_dt, dv_dt, dsoc_dt)
         
-        dynamics_func = ca.Function(
-            'dynamics', [x, u, p], [x_dot],
+        self._dynamics_time_func = ca.Function(
+            'dynamics_time',
+            [x, u, p], [x_dot],
             ['x', 'u', 'p'], ['x_dot']
         )
         
-        return dynamics_func
+        return self._dynamics_time_func
+    
+    def create_spatial_domain_dynamics(self) -> ca.Function:
+        """
+        Create CasADi function for spatial-domain dynamics (dx/ds).
+        
+        This formulation uses distance (s) as the independent variable,
+        which is natural for lap time optimization:
+        - Total time = integral(1/v, ds) from 0 to L
+        
+        State: x = [v, soc]
+            v: velocity (m/s)
+            soc: state of charge (0-1)
+        
+        Control: u = [P_ers, throttle, brake]
+        
+        Parameters: p = [gradient, radius]
+        
+        Returns:
+            CasADi Function: dynamics(x, u, p) -> [dx_ds, dt_ds]
+        """
+        
+        if self._dynamics_spatial_func is not None:
+            return self._dynamics_spatial_func
+        
+        # Get time-domain dynamics
+        time_dynamics = self.create_time_domain_dynamics()
+        
+        # States (spatial domain doesn't need position s)
+        v = ca.MX.sym('v')
+        soc = ca.MX.sym('soc')
+        
+        # Controls
+        P_ers = ca.MX.sym('P_ers')
+        throttle = ca.MX.sym('throttle')
+        brake = ca.MX.sym('brake')
+        
+        # Parameters  
+        gradient = ca.MX.sym('gradient')
+        radius = ca.MX.sym('radius')
+        
+        # Call time-domain dynamics
+        x_time = ca.vertcat(0, v, soc)  # s = 0 (dummy, not used)
+        u = ca.vertcat(P_ers, throttle, brake)
+        p = ca.vertcat(gradient, radius)
+        
+        x_dot = time_dynamics(x_time, u, p)
+        
+        # Extract derivatives
+        # ds_dt = v, dv_dt, dsoc_dt from time domain
+        ds_dt = x_dot[0]  # = v
+        dv_dt = x_dot[1]
+        dsoc_dt = x_dot[2]
+        
+        # Convert to spatial domain: dx/ds = (dx/dt) / (ds/dt)
+        v_safe = ca.fmax(v, 1.0)
+        
+        dv_ds = dv_dt / v_safe      # dv/ds = (dv/dt) / v
+        dsoc_ds = dsoc_dt / v_safe  # dsoc/ds = (dsoc/dt) / v
+        dt_ds = 1.0 / v_safe        # dt/ds = 1/v (for time integration)
+        
+        # Outputs
+        x_spatial = ca.vertcat(v, soc)
+        dx_ds = ca.vertcat(dv_ds, dsoc_ds)
+        
+        self._dynamics_spatial_func = ca.Function(
+            'dynamics_spatial',
+            [x_spatial, u, p], [dx_ds, dt_ds],
+            ['x', 'u', 'p'], ['dx_ds', 'dt_ds']
+        )
+        
+        return self._dynamics_spatial_func
     
     def get_constraints(self) -> Dict:
         """Return system constraints"""
         return {
+            # ERS power limits
             'P_ers_min': -self.ers.max_recovery_power,
             'P_ers_max': self.ers.max_deployment_power,
+            
+            # SOC limits
             'soc_min': self.ers.min_soc,
             'soc_max': self.ers.max_soc,
-            'v_min': 10,   # m/s (36 km/h)
-            'v_max': 100,  # m/s (360 km/h)
-            'throttle_min': 0,
-            'throttle_max': 1,
-            'brake_min': 0,
-            'brake_max': 1,
+            
+            # Velocity limits
+            'v_min': 10.0,   # m/s (~36 km/h)
+            'v_max': 100.0,  # m/s (~360 km/h)
+            
+            # Control limits
+            'throttle_min': 0.0,
+            'throttle_max': 1.0,
+            'brake_min': 0.0,
+            'brake_max': 1.0,
         }
         
+    def simulate_step_numpy(self,
+                            state: np.ndarray,
+                            control: np.ndarray,
+                            track_params: np.ndarray,
+                            dt: float
+                        ) -> np.ndarray:
+        """Simulate one time step using Euler integration"""
+        dynamics = self.create_time_domain_dynamics()
+        x_dot = dynamics(state, control, track_params).full().flatten()
+        
+        new_state = state + x_dot * dt
+        
+        # Apply constraints
+        new_state[1] = np.clip(new_state[1], 10, 100)  # velocity
+        new_state[2] = np.clip(new_state[2], 
+                               self.ers.min_soc, 
+                               self.ers.max_soc)
+        
+        return new_state
+    
+    def compute_max_acceleration(self, v: float, soc: float, 
+                                 gradient: float, radius: float,
+                                 throttle: float = 1.0) -> float:
+        """Compute maximum possible acceleration at current state"""
+        
+        # Aerodynamic forces
+        q = 0.5 * self.vehicle.rho_air * v**2
+        F_drag = q * self.vehicle.cd * self.vehicle.frontal_area
+        F_downforce = q * self.vehicle.cl * self.vehicle.frontal_area
+        
+        # Normal force
+        F_normal = self.vehicle.mass * self.vehicle.g * np.cos(gradient) + F_downforce
+        
+        # Rolling resistance
+        F_rolling = self.vehicle.cr * F_normal
+        
+        # Gravity
+        F_gravity = self.vehicle.mass * self.vehicle.g * np.sin(gradient)
+        
+        # Friction circle (lateral force)
+        F_tire_max = self.vehicle.mu_lateral * F_normal
+        a_lat = v**2 / max(radius, 10)
+        F_lateral = self.vehicle.mass * a_lat
+        
+        F_long_available = np.sqrt(max(F_tire_max**2 - F_lateral**2, 0))
+        
+        # Power-limited traction
+        P_total = throttle * self.vehicle.max_ice_power
+        if soc > self.ers.min_soc:
+            P_total += self.ers.max_deployment_power
+        
+        F_traction = min(P_total / max(v, 1), F_long_available)
+        
+        # Net force
+        F_net = F_traction - F_drag - F_rolling - F_gravity
+        
+        return F_net / self.vehicle.mass

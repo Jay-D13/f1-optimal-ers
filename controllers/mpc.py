@@ -1,279 +1,431 @@
-from cmath import sqrt
 import numpy as np
 import casadi as ca
-from typing import Tuple, Dict
+from typing import Dict, Tuple, Optional
+import time
 
 from models import VehicleDynamicsModel, F1TrackModel
+from .offline_optimizer import OptimalTrajectory
 
 
-class ERSOptimalController:
-    """MPC-based optimal controller for ERS deployment"""
+class OnlineMPController:
+    """
+    Online MPC controller that tracks the globally optimal trajectory.
     
-    def __init__(self, vehicle_model: VehicleDynamicsModel, 
+    The MPC minimizes:
+        J = Σ[ w_v*(v - v_ref)² + w_soc*(soc - soc_ref)² + w_u*Δu² ]
+    
+    Subject to:
+        - Vehicle dynamics
+        - State/control constraints
+        - Friction circle (lateral acceleration limit)
+    """
+    
+    def __init__(self,
+                 vehicle_model: VehicleDynamicsModel,
                  track_model: F1TrackModel,
-                 horizon_time: float = 5.0,
+                 horizon_distance: float = 200.0,
                  dt: float = 0.1):
-        self.vehicle_model = vehicle_model
-        self.track_model = track_model
-        self.horizon_time = horizon_time
-        self.dt = dt
-        self.N = int(horizon_time / dt)  # Prediction horizon steps
+        """
+        Initialize the online MPC controller.
         
+        Args:
+            vehicle_model: Vehicle dynamics model
+            track_model: Track model with geometry data
+            horizon_distance: Prediction horizon in meters
+            dt: Time discretization step (seconds)
+        """
+        self.vehicle = vehicle_model
+        self.track = track_model
+        self.horizon_distance = horizon_distance
+        self.dt = dt
+        
+        # Reference trajectory (set by set_reference())
+        self.reference: Optional[OptimalTrajectory] = None
+        
+        # MPC horizon adapts based on velocity
+        self.N_max = 50  # Maximum horizon steps
+        self.N_min = 10  # Minimum horizon steps
+        
+        # CasADi problem (rebuilt for each solve for flexibility)
         self.opti = None
         self.solution = None
-        self.dynamics_func = None
-        self.failed_solves = 0  # Track consecutive failures
+        self.fallback_counter = 0 # Track how many times we've fallen back in a row
         
-    def setup_optimization(self):
-        """Setup the CasADi optimization problem with Lateral G constraints"""
-        self.opti = ca.Opti()
+        # Warm start data
+        self.prev_x_opt = None
+        self.prev_u_opt = None
         
-        # 1. Get dynamics and basic constraints
-        self.dynamics_func = self.vehicle_model.create_casadi_function()
-        constraints = self.vehicle_model.get_constraints()
+        # Performance tracking
+        self.solve_count = 0
+        self.fail_count = 0
+        self.total_solve_time = 0.0
         
-        self.soc_target_param = self.opti.parameter(self.N)
+        # Weights (tuning parameters)
+        self.w_v = 1.0          # Velocity tracking weight
+        self.w_soc = 50.0       # SOC tracking weight
+        self.w_P_ers = 0.001    # ERS power smoothness
+        self.w_throttle = 0.01  # Throttle smoothness
+        self.w_brake = 0.01     # Brake smoothness
+        self.w_terminal = 10.0  # Terminal cost weight
         
-        # 2. Decision variables
-        X = self.opti.variable(3, self.N+1)  # States: [pos, vel, soc]
-        U = self.opti.variable(3, self.N)    # Controls: [P_ers, throttle, brake]
+        print(f"   Online MPC initialized:")
+        print(f"     Horizon: {horizon_distance} m")
+        print(f"     Time step: {dt} s")
+    
+    def set_reference(self, reference: OptimalTrajectory) -> None:
+        """Set the reference trajectory from global optimizer"""
+        self.reference = reference
+        print(f"   Reference trajectory loaded: {reference.lap_time:.2f}s lap")
+    
+    def solve_mpc_step(self,
+                       current_state: np.ndarray,
+                       track_position: float,
+                       soc_reference_trajectory: np.ndarray = None
+                       ) -> Tuple[np.ndarray, Dict]:
+        """
+        Solve one MPC iteration.
         
-        # 3. Parameters
-        x0 = self.opti.parameter(3)  # Initial state
-        track_params = self.opti.parameter(2, self.N)  # [gradient, radius]
+        Args:
+            current_state: Current state [position, velocity, soc]
+            track_position: Current distance along track (m)
+            soc_reference_trajectory: Optional explicit SOC reference
         
-        # 4. Objective Function Setup
+        Returns:
+            control: Optimal control [P_ers, throttle, brake]
+            info: Dictionary with solve information
+        """
+        
+        start_time = time.time()
+        
+        # Get current velocity to determine horizon
+        v_current = max(current_state[1], 20.0)
+        
+        # Adaptive horizon based on velocity
+        # At high speed, we need more look-ahead distance
+        N = int(self.horizon_distance / (v_current * self.dt))
+        N = max(self.N_min, min(N, self.N_max))
+        
+        # Build and solve MPC
+        try:
+            control, info = self._solve_mpc(
+                current_state, track_position, N, 
+                soc_reference_trajectory
+            )
+            self.solve_count += 1
+            self.fallback_counter = 0
+            
+        except Exception as e:
+            # Fallback to simple rule-based control
+            self.fallback_counter += 1
+            control, fallback_type = self._fallback_control(current_state, track_position)
+            
+            info = {
+                'success': False,
+                'error': str(e),
+                'fallback': True,
+                'fallback_type': fallback_type,
+                'predicted_states': None,
+                'predicted_controls': None
+            }
+            self.fail_count += 1
+        
+        solve_time = time.time() - start_time
+        self.total_solve_time += solve_time
+        info['solve_time'] = solve_time
+        
+        return control, info
+    
+    def _solve_mpc(self,
+                   current_state: np.ndarray,
+                   track_position: float,
+                   N: int,
+                   soc_ref_explicit: Optional[np.ndarray] = None
+                   ) -> Tuple[np.ndarray, Dict]:
+        """Internal MPC solve"""
+        
+        opti = ca.Opti()
+        constraints = self.vehicle.get_constraints()
+        dynamics = self.vehicle.create_time_domain_dynamics()
+        
+        # === Decision Variables ===
+        X = opti.variable(3, N + 1)  # [s, v, soc]
+        U = opti.variable(3, N)      # [P_ers, throttle, brake]
+        
+        # === Parameters ===
+        x0 = opti.parameter(3)
+        v_ref = opti.parameter(N + 1)
+        soc_ref = opti.parameter(N + 1)
+        track_params = opti.parameter(2, N)  # [gradient, radius]
+        
+        # === Objective Function ===
         obj = 0
-        
-        # Constants for weights (tuning knobs)
-        W_progress = 10.0      # Weight for maximizing velocity
-        W_energy_diff = 50.0   # Weight for keeping SOC near target
-        W_smooth = 0.1         # Weight for smooth control changes
-        
-        # Lateral physics constants
-        mu_lat = 1.8  # Max lateral friction coefficient (Dry F1 tires)
-        g = 9.81
-        
-        for k in range(self.N):
-            # --- Cost: Maximize Velocity (Progress) ---
-            obj -= W_progress * X[1, k]
+        for k in range(N):
+            # Tracking errors
+            v_error = X[1, k] - v_ref[k]
+            soc_error = X[2, k] - soc_ref[k]
             
-            # --- Cost: Energy Management ---
-            # Instead of a hard target of 0.5, we penalize being empty
-            # and gently encourage staying in the middle.
-            # This allows the car to use energy when needed.
-            soc_deviation = (X[2, k] - self.soc_target_param[k]) 
-            obj += W_energy_diff * soc_deviation**2
+            obj += self.w_v * v_error**2
+            obj += self.w_soc * soc_error**2
             
-            # --- Cost: Smoothness ---
+            # Control smoothness
             if k > 0:
-                # Penalize rapid changes in ERS and Throttle
-                obj += W_smooth * (U[0, k] - U[0, k-1])**2 
-                obj += W_smooth * (U[1, k] - U[1, k-1])**2
-            
-            # --- Constraint: The "Friction Circle" (The Fix) ---
-            # Calculate max speed allowed by corner radius: v_max = sqrt(mu * g * R)
-            
-            # 1. Get radius, ensuring we handle straight lines (Inf) safely
-            # We treat any radius > 2000m as effectively straight for grip purposes
-            r_k = track_params[1, k]
-            safe_r = ca.fmin(r_k, 2000.0) 
-            
-            # 2. Calculate the physical speed limit for this segment
-            # v^2 / R <= mu * g  ->  v <= sqrt(mu * g * R)
-            v_max_corner = ca.sqrt(mu_lat * g * safe_r)
-            
-            # 3. Apply as a constraint
-            # We use fmin so the limit is never higher than the car's mechanical max speed
-            limit = ca.fmin(v_max_corner, constraints['v_max'])
-            self.opti.subject_to(X[1, k] <= limit)
-            
-            # --- Dynamics Integration (RK4) ---
+                obj += self.w_P_ers * (U[0, k] - U[0, k-1])**2
+                obj += self.w_throttle * (U[1, k] - U[1, k-1])**2
+                obj += self.w_brake * (U[2, k] - U[2, k-1])**2
+        
+        # Terminal cost
+        obj += self.w_terminal * (X[1, N] - v_ref[N])**2
+        obj += self.w_terminal * (X[2, N] - soc_ref[N])**2
+        
+        # prevents the solver from crashing if we are slightly over speed limit
+        slacks = opti.variable(N + 1)
+        obj += 1e5 * ca.sumsqr(slacks) # high penalty
+        
+        opti.minimize(obj)
+        
+        # === Dynamics Constraints (RK4) ===
+        for k in range(N):
             x_k = X[:, k]
             u_k = U[:, k]
             p_k = track_params[:, k]
             
-            k1 = self.dynamics_func(x_k, u_k, p_k)
-            k2 = self.dynamics_func(x_k + self.dt/2 * k1, u_k, p_k)
-            k3 = self.dynamics_func(x_k + self.dt/2 * k2, u_k, p_k)
-            k4 = self.dynamics_func(x_k + self.dt * k3, u_k, p_k)
+            # RK4 integration
+            k1 = dynamics(x_k, u_k, p_k)
+            k2 = dynamics(x_k + self.dt/2 * k1, u_k, p_k)
+            k3 = dynamics(x_k + self.dt/2 * k2, u_k, p_k)
+            k4 = dynamics(x_k + self.dt * k3, u_k, p_k)
             x_next = x_k + self.dt/6 * (k1 + 2*k2 + 2*k3 + k4)
             
-            self.opti.subject_to(X[:, k+1] == x_next)
+            opti.subject_to(X[:, k+1] == x_next)
             
-            # --- Actuator Constraints ---
-            self.opti.subject_to(self.opti.bounded(constraints['P_ers_min'], U[0, k], constraints['P_ers_max']))
-            self.opti.subject_to(self.opti.bounded(constraints['throttle_min'], U[1, k], constraints['throttle_max']))
-            self.opti.subject_to(self.opti.bounded(constraints['brake_min'], U[2, k], constraints['brake_max']))
+            # Control bounds
+            opti.subject_to(opti.bounded(constraints['P_ers_min'], U[0, k], constraints['P_ers_max']))
+            opti.subject_to(opti.bounded(0, U[1, k], 1))
+            opti.subject_to(opti.bounded(0, U[2, k], 1))
             
-            # No simultaneous throttle and brake
-            self.opti.subject_to(U[1, k] * U[2, k] <= 1e-4)
+            # Friction Circle / Speed Limit (Soft Constraint)
+            radius_k = track_params[1, k]
+            v_max_corner = ca.sqrt(1.8 * 9.81 * ca.fmin(radius_k, 2000))
             
-        # 5. Boundary Conditions
-        self.opti.subject_to(X[:, 0] == x0) # Initial state
+            # Relaxed constraint: v <= v_max + slack
+            opti.subject_to(X[1, k] <= ca.fmin(v_max_corner, constraints['v_max']) + slacks[k])
+            opti.subject_to(slacks[k] >= 0)
         
-        # Terminal Constraints (Safety)
-        # Ensure we don't end the horizon with an empty battery
-        self.opti.subject_to(X[2, -1] >= 0.2) 
+        # === State Constraints ===
+        for k in range(N + 1):
+            opti.subject_to(X[1, k] >= constraints['v_min'])
+            opti.subject_to(X[2, k] >= constraints['soc_min'])
+            opti.subject_to(X[2, k] <= constraints['soc_max'])
+            
+            # Speed limit from track (using reference as proxy)
+            # opti.subject_to(X[1, k] <= v_ref[k] * 1.1 + 5)  # Allow 10% overspeed margin
         
-        self.opti.minimize(obj)
+        # === Control Constraints ===
+        # for k in range(N):
+        #     opti.subject_to(opti.bounded(
+        #         constraints['P_ers_min'], U[0, k], constraints['P_ers_max']
+        #     ))
+        #     opti.subject_to(opti.bounded(0, U[1, k], 1))
+        #     opti.subject_to(opti.bounded(0, U[2, k], 1))
+            
+        #     # Friction circle approximation via speed limit
+        #     # (more sophisticated version would use explicit lateral force)
+        #     radius_k = track_params[1, k]
+        #     v_max_corner = ca.sqrt(1.8 * 9.81 * ca.fmin(radius_k, 2000))
+            
+        #     slacks = opti.variable(N + 1)
+        #     opti.minimize(obj + 100000 * ca.sumsqr(slacks)) # Huge penalty
+
+        #     opti.subject_to(X[1, k] <= ca.fmin(v_max_corner, constraints['v_max']) + slacks[k])
+        #     opti.subject_to(slacks[k] >= 0)
         
-        # 6. Solver Settings
+        # === Initial Condition ===
+        opti.subject_to(X[:, 0] == x0)
+        
+        # === Solver Options ===
         opts = {
-            'ipopt.max_iter': 250,
+            'ipopt.max_iter': 100,
             'ipopt.print_level': 0,
             'print_time': 0,
-            'ipopt.acceptable_tol': 1e-4,
-            'ipopt.acceptable_obj_change_tol': 1e-4,
             'ipopt.tol': 1e-4,
-            'ipopt.warm_start_init_point': 'yes'
+            'ipopt.warm_start_init_point': 'yes',
         }
-        self.opti.solver('ipopt', opts)
+        opti.solver('ipopt', opts)
         
-        # Save references
-        self.X = X
-        self.U = U
-        self.x0_param = x0
-        self.track_params = track_params
-        self.soc_target_param = self.soc_target_param
-          
-    def solve_mpc_step(self, 
-                       current_state: np.ndarray, 
-                       track_position: float,
-                       soc_reference_trajectory: np.ndarray = None
-                       ) -> Tuple[np.ndarray, Dict]:
-        """Solve one MPC iteration"""
-        # Set current state
-        self.opti.set_value(self.x0_param, current_state)
+        # === Set Parameter Values ===
+        opti.set_value(x0, current_state)
         
-        # Set track parameters for horizon
-        track_data = self._get_track_preview(track_position, current_state[1])
-        self.opti.set_value(self.track_params, track_data)
+        # Get track preview
+        track_preview = self._get_track_preview(track_position, current_state[1], N)
+        opti.set_value(track_params, track_preview)
         
-        if soc_reference_trajectory is not None:
-            if len(soc_reference_trajectory) != self.N:
-                ref = np.resize(soc_reference_trajectory, self.N)
-            else:
-                ref = soc_reference_trajectory
-            
-            self.opti.set_value(self.soc_target_param, ref)
+        # Get reference trajectory
+        if soc_ref_explicit is not None:
+             opti.set_value(soc_ref, soc_ref_explicit[:N+1])
         else:
-            self.opti.set_value(self.soc_target_param, np.full(self.N, 0.5))
+             opti.set_value(soc_ref, self._get_soc_reference(track_position, current_state[1], N))
         
-        # Warm start from previous solution if available
-        if self.solution is not None:
+        v_reference = self._get_velocity_reference(track_position, current_state[1], N)
+        
+        opti.set_value(v_ref, v_reference)
+        # opti.set_value(soc_ref, soc_reference)
+        
+        # === Warm Start ===
+        if self.prev_x_opt is not None and self.prev_x_opt.shape[1] >= N + 1:
             try:
-                # Shift previous solution for better warm start
-                x_warm = np.hstack([self.solution['x_opt'][:, 1:], 
-                                   self.solution['x_opt'][:, -1:]])
-                u_warm = np.hstack([self.solution['u_opt'][:, 1:], 
-                                   self.solution['u_opt'][:, -1:]])
+                # Shift previous solution
+                x_warm = np.hstack([
+                    self.prev_x_opt[:, 1:N+1], 
+                    self.prev_x_opt[:, -1:]
+                ])
+                u_warm = np.hstack([
+                    self.prev_u_opt[:, 1:N], 
+                    self.prev_u_opt[:, -1:]
+                ])
                 
-                self.opti.set_initial(self.X, x_warm)
-                self.opti.set_initial(self.U, u_warm)
+                if x_warm.shape[1] == N + 1 and u_warm.shape[1] == N:
+                    opti.set_initial(X, x_warm)
+                    opti.set_initial(U, u_warm)
             except:
-                pass  # Ignore warm start errors
-        else:
-            # Initialize with reasonable values
-            v_init = current_state[1]
-            soc_init = current_state[2]
-            
-            # Simple initialization
-            x_init = np.zeros((3, self.N+1))
-            x_init[0, :] = np.linspace(current_state[0], 
-                                       current_state[0] + v_init * self.horizon_time, 
-                                       self.N+1)
-            x_init[1, :] = v_init
-            x_init[2, :] = soc_init
-            
-            u_init = np.zeros((3, self.N))
-            u_init[1, :] = 0.7  # Moderate throttle
-            
-            self.opti.set_initial(self.X, x_init)
-            self.opti.set_initial(self.U, u_init)
+                pass
         
-        # Solve
-        try:
-            sol = self.opti.solve()
-            
-            # Extract and store solution
-            u_opt = sol.value(self.U)
-            x_opt = sol.value(self.X)
-            
-            self.solution = {
-                'x_opt': x_opt,
-                'u_opt': u_opt
-            }
-            
-            self.failed_solves = 0  # Reset failure counter
-            
-            info = {
-                'success': True,
-                'predicted_states': x_opt,
-                'predicted_controls': u_opt,
-                'solve_time': 0.0
-            }
-            
-            # Return first control action
-            return u_opt[:, 0], info
-            
-        except Exception as e:
-            # Try to get debug solution if available
-            try:
-                u_opt = self.opti.debug.value(self.U)
-                x_opt = self.opti.debug.value(self.X)
-                
-                # Store debug solution for next warm start
-                self.solution = {
-                    'x_opt': x_opt,
-                    'u_opt': u_opt
-                }
-                
-                # Use first control from debug solution
-                return u_opt[:, 0], {'success': False, 'error': str(e), 'used_debug': True}
-                
-            except:
-                # Complete failure - return safe default control
-                self.failed_solves += 1
-                
-                # If too many consecutive failures, return conservative control
-                if self.failed_solves > 5:
-                    u_opt = np.array([0, 0.3, 0])  # Very conservative
-                else:
-                    u_opt = np.array([0, 0.6, 0])  # Moderate fallback
-                
-                info = {'success': False, 'error': str(e), 'failed_solves': self.failed_solves}
-                return u_opt, info
+        # === Solve ===
+        sol = opti.solve()
         
-    def _get_track_preview(self, current_position: float, current_velocity: float) -> np.ndarray:
-        """Get track parameters for the prediction horizon"""
-        track_data = np.zeros((2, self.N))
+        # Extract solution
+        x_opt = sol.value(X)
+        u_opt = sol.value(U)
         
-        # Use current velocity for better preview estimation
-        estimated_speed = max(current_velocity, 30)  # At least 30 m/s
+        # Store for warm start
+        self.prev_x_opt = x_opt
+        self.prev_u_opt = u_opt
         
-        for i in range(self.N):
-            future_pos = (current_position + i * self.dt * estimated_speed) % self.track_model.total_length
+        info = {
+            'success': True,
+            'predicted_states': x_opt,
+            'predicted_controls': u_opt,
+            'horizon': N,
+        }
+        
+        return u_opt[:, 0], info
+    
+    def _get_track_preview(self, current_pos: float, current_vel: float, 
+                           N: int) -> np.ndarray:
+        """Get track parameters for prediction horizon"""
+        
+        track_data = np.zeros((2, N))
+        
+        for k in range(N):
+            # Estimate future position
+            future_pos = current_pos + k * self.dt * current_vel
+            future_pos = future_pos % self.track.total_length
             
-            # Find corresponding segment
-            cumulative_length = 0
-            found = False
-            for segment in self.track_model.segments:
-                if cumulative_length + segment.length > future_pos:
-                    track_data[0, i] = float(segment.gradient)
-                    # Handle infinite radius (straights)
-                    if np.isinf(segment.radius):
-                        track_data[1, i] = 10000.0
-                    else:
-                        track_data[1, i] = float(segment.radius)
-                    found = True
-                    break
-                cumulative_length += segment.length
+            segment = self.track.get_segment_at_distance(future_pos)
             
-            # Default values if segment not found
-            if not found:
-                track_data[0, i] = 0.0
-                track_data[1, i] = 10000.0
-            
+            track_data[0, k] = segment.gradient
+            track_data[1, k] = min(segment.radius, 5000)  # Cap for numerics
+        
         return track_data
     
+    def _get_velocity_reference(self, current_pos: float, current_vel: float,
+                                 N: int) -> np.ndarray:
+        """Get velocity reference from global optimizer"""
+        
+        if self.reference is None:
+            # Fallback: use track speed limits
+            v_ref = np.ones(N + 1) * current_vel
+            return v_ref
+        
+        v_ref = np.zeros(N + 1)
+        
+        for k in range(N + 1):
+            future_pos = current_pos + k * self.dt * current_vel
+            ref = self.reference.get_reference_at_distance(future_pos)
+            v_ref[k] = ref['v_ref']
+        
+        return v_ref
+    
+    def _get_soc_reference(self, current_pos: float, current_vel: float,
+                            N: int) -> np.ndarray:
+        """Get SOC reference from global optimizer"""
+        
+        if self.reference is None:
+            # Fallback: target 50% SOC
+            return np.ones(N + 1) * 0.5
+        
+        soc_ref = np.zeros(N + 1)
+        
+        for k in range(N + 1):
+            future_pos = current_pos + k * self.dt * current_vel
+            ref = self.reference.get_reference_at_distance(future_pos)
+            soc_ref[k] = ref['soc_ref']
+        
+        return soc_ref
+    
+    def _fallback_control(self, state: np.ndarray, position: float) -> np.ndarray:
+        """
+        Two-stage fallback strategy:
+        1. Shifted Horizon: Use the valid plan from the previous step.
+        2. PID Tracker: If no previous plan, track reference velocity with simple logic.
+        """
+        
+        # STRATEGY 1: SHIFTED HORIZON (The "Ghost" Solution)
+        # If we solved successfully recently, the previous plan is still valid, just shifted by one dt.
+        if self.prev_u_opt is not None and self.fallback_counter < self.prev_u_opt.shape[1]:
+            # We index into the previous solution based on how many times we've failed
+            # If fail_count is 1, we take index 1 (the second step of previous plan)
+            idx = self.fallback_counter
+            
+            if idx < self.prev_u_opt.shape[1]:
+                u_fallback = self.prev_u_opt[:, idx]
+                return u_fallback, "shifted_horizon"
+
+        # STRATEGY 2: PID REFERENCE TRACKER (Emergency Mode)
+        # If we have no history or have run out of buffer, use simple physics
+        
+        # Get target velocity from offline reference
+        ref = self.reference.get_reference_at_distance(position)
+        v_target = ref['v_ref']
+        v_current = state[1]
+        
+        # Look ahead slightly (0.5s) to catch braking zones early
+        lookahead_pos = position + v_current * 0.5
+        ref_ahead = self.reference.get_reference_at_distance(lookahead_pos)
+        v_target = min(v_target, ref_ahead['v_ref'])
+        
+        # P-Controller
+        error = v_target - v_current
+        Kp_accel = 0.5
+        Kp_brake = 0.2
+        
+        throttle = 0.0
+        brake = 0.0
+        P_ers = 0.0
+        
+        if error > 0:
+            # We are too slow -> Accelerate
+            throttle = np.clip(Kp_accel * error, 0.0, 1.0)
+            
+            # Use ERS if throttle is high and we have SOC
+            if throttle > 0.9 and state[2] > 0.3:
+                P_ers = 120000 # Max deployment
+        else:
+            # We are too fast -> Brake
+            # Note: error is negative here
+            brake = np.clip(-Kp_brake * error, 0.0, 1.0)
+            
+            # Use ERS to help brake (Harvest)
+            if state[2] < 0.9:
+                P_ers = -120000 # Max harvest
+        
+        u_fallback = np.array([P_ers, throttle, brake])
+        return u_fallback, "pid_tracker"
+    
+    def get_statistics(self) -> Dict:
+        """Get performance statistics"""
+        return {
+            'solve_count': self.solve_count,
+            'fail_count': self.fail_count,
+            'success_rate': (self.solve_count / max(self.solve_count + self.fail_count, 1)) * 100,
+            'avg_solve_time': self.total_solve_time / max(self.solve_count, 1),
+        }

@@ -12,15 +12,9 @@
 
 ## Install `uv`
 
-### macOS/Linux
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # then restart your shell or ensure ~/.local/bin is on PATH
-```
-
-### Windows (PowerShell)
-```powershell
-iwr -useb https://astral.sh/uv/install.ps1 | iex
 ```
 
 Verify:
@@ -47,20 +41,14 @@ uv sync
 This will create a .venv environment to match `uv.lock` precisely.
 
 > If you want to use the environment without `uv run`, activate it:
-> - macOS/Linux: `source .venv/bin/activate`
-> - Windows PowerShell: `.venv\Scripts\Activate.ps1`
+> - `source .venv/bin/activate`
 
 ---
 
 ## Set up FastF1 cache (required)
 Create the cache directory once:
-- macOS/Linux:
   ```bash
   mkdir -p data/cache
-  ```
-- Windows:
-  ```powershell
-  mkdir data\cache
   ```
 
 ---
