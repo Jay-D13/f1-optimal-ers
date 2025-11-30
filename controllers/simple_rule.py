@@ -4,6 +4,7 @@ from typing import Dict, Tuple
 from models import F1TrackModel
 from config import VehicleConfig, ERSConfig
 
+# TODO still need to fix simple rule based controller so it follows propoer physics
 class SimpleRuleBasedStrategy:
     """
     Robust baseline strategy using a P-controller with lookahead.

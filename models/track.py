@@ -25,19 +25,6 @@ class TrackSegment:
     @property
     def is_corner(self) -> bool:
         return not self.is_straight
-    
-    @property
-    def corner_type(self) -> str:
-        if self.is_straight:
-            return "straight"
-        elif self.radius < 30:
-            return "hairpin"
-        elif self.radius < 80:
-            return "slow"
-        elif self.radius < 150:
-            return "medium"
-        else:
-            return "fast"
 
 
 @dataclass 
@@ -123,7 +110,7 @@ class F1TrackModel:
         
         self.total_length = distances[-1]
         
-        # 2. Compute curvature on the raw telemetry points (using the hybrid fix from before)
+        # 2. Compute curvature on the raw telemetry points
         curvature_raw, radius_raw = self._compute_curvature(x, y, distances, speeds)
         
         # 3. Create a fixed grid of distances (0, 5, 10, 15...)
@@ -199,26 +186,6 @@ class F1TrackModel:
         g = 9.81
         speeds_ms = speeds / 3.6
         radius_physics = (speeds_ms**2) / (LATERAL_G_TARGET * g + 1e-6)
-        
-        # 3. Hybrid Fusion
-        # If the car is going fast, the radius MUST be large (physics constraint).
-        # If the car is going slow, the radius MIGHT be small.
-        # We trust the 'larger' radius less, because GPS noise creates fake tight corners.
-        # But we also trust physics: you can't take a 50m radius at 300kph.
-        
-        # Key logic: The true radius is likely the value that explains the speed 
-        # best without being physically impossible.
-        
-        # Actually, the most robust way for F1 data is:
-        # Trust GPS for general shape, but CLAMP it with physics.
-        # If GPS says r=10m but Speed says min_r=100m, it's a straight line with noise.
-        
-        # However, looking at your old code, you effectively did:
-        # radius = min(radius_gps, radius_speed)
-        # This works well to sharpen corners, but we need to handle straights.
-        
-        # Let's use a weighted approach or simple min/max logic
-        # For straight identification: if radius_physics is huge, it's a straight.
         
         radius_combined = np.minimum(radius_gps, radius_physics * 1.5) 
         # Multiplier 1.5 allows for some variance (e.g. camber/banking/driver not pushing)

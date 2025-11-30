@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from config import ERSConfig
 from models import TrackSegment
 
-
+# TODO kinda useless for now... gonna divise into different folders the optimizers and baselines
 class BaselineStrategy(ABC):
     """Base class for baseline ERS strategies"""
     

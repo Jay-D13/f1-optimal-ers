@@ -1,25 +1,11 @@
-"""
-Pure Greedy ERS Baseline Strategy
-
-This is the "classic" greedy baseline used in literature for comparison.
-It represents a simple, non-optimized approach that real drivers might use.
-
-Strategy:
-1. Deploy max power whenever on a straight and battery available
-2. Harvest max power whenever braking
-3. No lookahead, no optimization
-
-This should perform WORSE than your smart heuristic and much worse than
-the offline optimizer, making it a good lower bound for comparison.
-"""
-
 import numpy as np
 from typing import Dict, Tuple
 
 from models import F1TrackModel
 from config import VehicleConfig, ERSConfig
 
-
+# TODO fix baselines to follow physics properly
+# TODO fuse with simple rule based controller?
 class PureGreedyStrategy:
     """
     Classic greedy baseline from ERS optimization literature.

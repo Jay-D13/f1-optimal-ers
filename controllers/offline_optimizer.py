@@ -120,6 +120,7 @@ class GlobalOfflineOptimizer:
         print(f"     Discretization: {self.N} points at {ds} m intervals")
     
     def setup_nlp(self, 
+                  v_limit_profile: np.ndarray,
                   initial_soc: float = 0.5,
                   final_soc_min: float = 0.3,
                   energy_limit: float = 4e6) -> None:
@@ -233,8 +234,10 @@ class GlobalOfflineOptimizer:
             
             # === State Constraints ===
             # Velocity limits (with soft slack)
-            self.opti.subject_to(V[k] >= constraints['v_min'] - SLACK_V[k])
-            self.opti.subject_to(V[k] <= v_max_k + SLACK_V[k])
+            # self.opti.subject_to(V[k] >= constraints['v_min'] - SLACK_V[k])
+            # self.opti.subject_to(V[k] <= v_max_k + SLACK_V[k])
+            limit_k = v_limit_profile[k] * 0.99 
+            self.opti.subject_to(V[k] <= limit_k + SLACK_V[k])
             
             # SOC limits (hard constraints for battery safety)
             self.opti.subject_to(SOC[k] >= constraints['soc_min'])
@@ -266,6 +269,7 @@ class GlobalOfflineOptimizer:
         self.opti.subject_to(SOC[0] == initial_soc)
         
         # Starting velocity (use first corner speed limit as estimate)
+        # maybe should use real starting data speed
         v_start = min(50.0, v_max_array[0])  # Conservative start
         self.opti.subject_to(V[0] >= v_start * 0.8)
         self.opti.subject_to(V[0] <= v_start * 1.2)
@@ -274,7 +278,7 @@ class GlobalOfflineOptimizer:
         # SOC should end at reasonable level (for next lap or race strategy)
         self.opti.subject_to(SOC[self.N] >= final_soc_min)
         
-        # Periodic velocity (optional, for consistency)
+        # Periodic velocity? (for consistency)
         # self.opti.subject_to(V[self.N] == V[0])
         
         # === Energy Limit Constraint ===
@@ -297,17 +301,20 @@ class GlobalOfflineOptimizer:
             'ipopt.tol': 1e-3,
             'ipopt.acceptable_tol': 1e-2,
             'ipopt.acceptable_iter': 15,
-            'ipopt.linear_solver': 'mumps',
+            'ipopt.linear_solver': 'ma97', # got a license yaaay! "mumps" or "ma27" if no license
             'ipopt.warm_start_init_point': 'yes',
+            
             # Robustness settings to handle NaN
             'ipopt.mu_strategy': 'adaptive',
             'ipopt.nlp_scaling_method': 'gradient-based',
             'ipopt.bound_relax_factor': 1e-8,
             'ipopt.honor_original_bounds': 'yes',
+            
             # Additional NaN prevention
             'ipopt.check_derivatives_for_naninf': 'yes',
             'ipopt.alpha_for_y': 'safer-min-dual-infeas',  # More conservative step
             'ipopt.recalc_y': 'yes',
+            
             # Derivative checker (helpful for debugging)
             # 'ipopt.derivative_test': 'first-order',
             # 'ipopt.derivative_test_tol': 1e-4,

@@ -179,9 +179,12 @@ class OnlineMPController:
         
         # prevents the solver from crashing if we are slightly over speed limit
         slacks = opti.variable(N + 1)
-        obj += 1e5 * ca.sumsqr(slacks) # high penalty
+        obj += 1e2 * ca.sumsqr(slacks) # high penalty
         
         opti.minimize(obj)
+        
+        SLACK_DYN = opti.variable(3, N)
+        opti.minimize(obj + 1e4 * ca.sumsqr(SLACK_DYN))
         
         # === Dynamics Constraints (RK4) ===
         for k in range(N):
@@ -196,7 +199,8 @@ class OnlineMPController:
             k4 = dynamics(x_k + self.dt * k3, u_k, p_k)
             x_next = x_k + self.dt/6 * (k1 + 2*k2 + 2*k3 + k4)
             
-            opti.subject_to(X[:, k+1] == x_next)
+            # opti.subject_to(X[:, k+1] == x_next)
+            opti.subject_to(X[:, k+1] == x_next + SLACK_DYN[:, k])
             
             # Control bounds
             opti.subject_to(opti.bounded(constraints['P_ers_min'], U[0, k], constraints['P_ers_max']))
@@ -204,11 +208,11 @@ class OnlineMPController:
             opti.subject_to(opti.bounded(0, U[2, k], 1))
             
             # Friction Circle / Speed Limit (Soft Constraint)
-            radius_k = track_params[1, k]
-            v_max_corner = ca.sqrt(1.8 * 9.81 * ca.fmin(radius_k, 2000))
+            # radius_k = track_params[1, k]
+            # v_max_corner = ca.sqrt(1.8 * 9.81 * ca.fmin(radius_k, 2000))
             
-            # Relaxed constraint: v <= v_max + slack
-            opti.subject_to(X[1, k] <= ca.fmin(v_max_corner, constraints['v_max']) + slacks[k])
+            # # Relaxed constraint: v <= v_max + slack
+            # opti.subject_to(X[1, k] <= ca.fmin(v_max_corner, constraints['v_max']) + slacks[k])
             opti.subject_to(slacks[k] >= 0)
         
         # === State Constraints ===
@@ -247,7 +251,8 @@ class OnlineMPController:
             'ipopt.max_iter': 100,
             'ipopt.print_level': 0,
             'print_time': 0,
-            'ipopt.tol': 1e-4,
+            'ipopt.linear_solver': 'ma97', # "mumps" if no license
+            'ipopt.tol': 1e-3,
             'ipopt.warm_start_init_point': 'yes',
         }
         opti.solver('ipopt', opts)
@@ -369,7 +374,7 @@ class OnlineMPController:
         2. PID Tracker: If no previous plan, track reference velocity with simple logic.
         """
         
-        # STRATEGY 1: SHIFTED HORIZON (The "Ghost" Solution)
+        # SHIFTED HORIZON (The "Ghost" Solution)
         # If we solved successfully recently, the previous plan is still valid, just shifted by one dt.
         if self.prev_u_opt is not None and self.fallback_counter < self.prev_u_opt.shape[1]:
             # We index into the previous solution based on how many times we've failed
@@ -380,7 +385,7 @@ class OnlineMPController:
                 u_fallback = self.prev_u_opt[:, idx]
                 return u_fallback, "shifted_horizon"
 
-        # STRATEGY 2: PID REFERENCE TRACKER (Emergency Mode)
+        # PID REFERENCE TRACKER (Emergency Mode)
         # If we have no history or have run out of buffer, use simple physics
         
         # Get target velocity from offline reference

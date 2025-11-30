@@ -1,4 +1,3 @@
-import numpy as np
 import casadi as ca
 from typing import Dict
 
@@ -130,7 +129,7 @@ class VehicleDynamicsModel:
         dv_dt = F_net / m
         
         # === Battery Dynamics ===
-        # CRITICAL: Sign convention
+        # sign convention:
         # - P_ers > 0: Deployment -> battery LOSES energy -> SOC DECREASES
         # - P_ers < 0: Recovery -> battery GAINS energy -> SOC INCREASES
         #
@@ -138,11 +137,22 @@ class VehicleDynamicsModel:
         # - Deployment: P_battery = P_ers / η_deploy (more internal loss)
         # - Recovery: P_battery = P_ers * η_recover (less recovered)
         
-        P_battery = ca.if_else(
-            P_ers >= 0,
-            P_ers / self.ers.deployment_efficiency,   # Deployment: divide
-            P_ers * self.ers.recovery_efficiency      # Recovery: multiply
-        )
+        # P_battery = ca.if_else(
+        #     P_ers >= 0,
+        #     P_ers / self.ers.deployment_efficiency,   # Deployment: divide
+        #     P_ers * self.ers.recovery_efficiency      # Recovery: multiply
+        # )
+        
+        # sigmoid function to blend between the two efficiency modes continuously
+        # k_smooth determines sharpness. 0.1 to 1.0 is usually good for Power in Watts.
+        sigma = 0.5 * (1 + ca.tanh(P_ers / 1000.0)) 
+
+        eta_d = self.ers.deployment_efficiency
+        eta_r = self.ers.recovery_efficiency
+
+        # Smooth blend: when P_ers > 0, sigma -> 1 (divide by eff). 
+        # When P_ers < 0, sigma -> 0 (multiply by eff).
+        P_battery = sigma * (P_ers / eta_d) + (1 - sigma) * (P_ers * eta_r)
         
         # dsoc/dt = -P_battery / E_capacity
         # Negative because P_battery > 0 means energy leaving battery
@@ -255,60 +265,3 @@ class VehicleDynamicsModel:
             'brake_max': 1.0,
         }
         
-    def simulate_step_numpy(self,
-                            state: np.ndarray,
-                            control: np.ndarray,
-                            track_params: np.ndarray,
-                            dt: float
-                        ) -> np.ndarray:
-        """Simulate one time step using Euler integration"""
-        dynamics = self.create_time_domain_dynamics()
-        x_dot = dynamics(state, control, track_params).full().flatten()
-        
-        new_state = state + x_dot * dt
-        
-        # Apply constraints
-        new_state[1] = np.clip(new_state[1], 10, 100)  # velocity
-        new_state[2] = np.clip(new_state[2], 
-                               self.ers.min_soc, 
-                               self.ers.max_soc)
-        
-        return new_state
-    
-    def compute_max_acceleration(self, v: float, soc: float, 
-                                 gradient: float, radius: float,
-                                 throttle: float = 1.0) -> float:
-        """Compute maximum possible acceleration at current state"""
-        
-        # Aerodynamic forces
-        q = 0.5 * self.vehicle.rho_air * v**2
-        F_drag = q * self.vehicle.cd * self.vehicle.frontal_area
-        F_downforce = q * self.vehicle.cl * self.vehicle.frontal_area
-        
-        # Normal force
-        F_normal = self.vehicle.mass * self.vehicle.g * np.cos(gradient) + F_downforce
-        
-        # Rolling resistance
-        F_rolling = self.vehicle.cr * F_normal
-        
-        # Gravity
-        F_gravity = self.vehicle.mass * self.vehicle.g * np.sin(gradient)
-        
-        # Friction circle (lateral force)
-        F_tire_max = self.vehicle.mu_lateral * F_normal
-        a_lat = v**2 / max(radius, 10)
-        F_lateral = self.vehicle.mass * a_lat
-        
-        F_long_available = np.sqrt(max(F_tire_max**2 - F_lateral**2, 0))
-        
-        # Power-limited traction
-        P_total = throttle * self.vehicle.max_ice_power
-        if soc > self.ers.min_soc:
-            P_total += self.ers.max_deployment_power
-        
-        F_traction = min(P_total / max(v, 1), F_long_available)
-        
-        # Net force
-        F_net = F_traction - F_drag - F_rolling - F_gravity
-        
-        return F_net / self.vehicle.mass

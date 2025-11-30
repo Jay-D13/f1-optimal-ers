@@ -23,10 +23,6 @@ class ERSConfig:
     min_soc: float = 0.20                   # Never fully discharge
     max_soc: float = 0.90                   # Never fully charge
     
-    # TODO: do we consider thermal constraints? (simplified)
-    max_battery_temp: float = 60.0          # °C
-    max_motor_temp: float = 150.0           # °C
-    
     @property
     def usable_soc_range(self) -> float:
         """Available SOC swing for optimization"""
