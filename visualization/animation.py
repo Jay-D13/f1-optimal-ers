@@ -1,6 +1,8 @@
 from typing import Dict
 import numpy as np
-
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Circle
 from models import F1TrackModel
 
 
@@ -9,9 +11,7 @@ def visualize_lap_animated(track_model: F1TrackModel,
                           strategy_name: str = "MPC",
                           save_path: str = "../figures/lap_animation.gif"):
     """Create animated visualization of car going around track"""
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-    from matplotlib.patches import Circle
+    
     
     if track_model.telemetry_data is None:
         print("No track data for visualization")

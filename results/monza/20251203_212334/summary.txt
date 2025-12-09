@@ -1,0 +1,39 @@
+
+        ======================================================================
+        F1 ERS OPTIMIZATION RESULTS - MONZA
+        ======================================================================
+
+        TRACK INFORMATION:
+        Track:              Monza
+        Year:               2024
+        Total Length:       5754 m
+        Number of Segments: 1151
+
+        LAP TIME PERFORMANCE:
+        Lap Time (No ERS):      82.407 s
+        Lap Time (With ERS):    79.197 s
+        Lap Time (Optimal):     82.848 s
+        
+        Improvement vs No ERS:  -0.441 s (-0.54%)
+        Gap to Theoretical:     3.651 s
+
+        SOLVER INFORMATION:
+        Status:                 suboptimal
+        Solve Time:             304.20 s
+        Solver Type:            nlp
+
+        ENERGY MANAGEMENT:
+        Initial SOC:            50.0%
+        Final SOC:              31.2%
+        Energy Deployed:        2.334 MJ
+        Energy Recovered:       1.897 MJ
+        Net Energy Used:        0.437 MJ
+        Recovery Efficiency:    81.3%
+
+        VELOCITY STATISTICS:
+        No ERS Profile:         77 - 319 km/h
+        With ERS Profile:       77 - 339 km/h
+        Optimal Strategy:       78 - 309 km/h (avg: 263 km/h)
+
+        ======================================================================
+    

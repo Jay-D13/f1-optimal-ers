@@ -1,10 +1,11 @@
 import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import time
 
 from models import VehicleDynamicsModel, F1TrackModel
-from controllers import OptimalTrajectory
+# from controllers import OptimalTrajectory
+from solvers.base import OptimalTrajectory
 
 @dataclass
 class LapResult:
@@ -104,31 +105,27 @@ class LapSimulator:
         constraints = self.vehicle.get_constraints()
         
         while not lap_complete and t < max_time:
-            # Get current track segment
             position = state[0] % self.track.total_length
             segment = self.track.get_segment_at_distance(position)
             
             # Get reference if available
-            v_ref = None
-            soc_ref = None
             if reference is not None:
                 ref = reference.get_reference_at_distance(position)
-                v_ref = ref['v_ref']
-                soc_ref = ref['soc_ref']
-                v_ref_history.append(v_ref)
-                soc_ref_history.append(soc_ref)
+                v_ref_history.append(ref['v_ref'])
+                soc_ref_history.append(ref['soc_ref'])
             
             # Get control action
             start_solve = time.time()
             
             if hasattr(self.controller, 'solve_mpc_step'):
-                # MPC controller
                 control, info = self.controller.solve_mpc_step(state, position)
                 solve_times.append(time.time() - start_solve)
                 solve_success.append(info.get('success', False))
             else:
-                # Rule-based controller
-                control = self.controller.get_control(state, segment)
+                control = self.controller.get_control(state, {
+                    'gradient': segment.gradient,
+                    'radius': segment.radius,
+                })
                 solve_times.append(0.0)
                 solve_success.append(True)
             
@@ -169,18 +166,16 @@ class LapSimulator:
         throttle_history = np.array(throttle_history)
         brake_history = np.array(brake_history)
         
-        # Compute energy totals
+        # Compute energy
         energy_deployed = 0.0
         energy_recovered = 0.0
-        
-        for i, P_ers in enumerate(P_ers_history):
+        for P_ers in P_ers_history:
             if P_ers > 0:
                 energy_deployed += P_ers * self.dt
             else:
                 energy_recovered += -P_ers * self.dt
         
-        # Create result
-        result = LapResult(
+        return LapResult(
             times=times,
             positions=positions,
             velocities=velocities,
@@ -198,8 +193,6 @@ class LapSimulator:
             solve_times=np.array(solve_times),
             solve_success=np.array(solve_success),
         )
-        
-        return result
     
     def _integrate_rk4(self, state: np.ndarray, control: np.ndarray,
                        track_params: np.ndarray) -> np.ndarray:
@@ -213,15 +206,7 @@ class LapSimulator:
         return state + self.dt / 6 * (k1 + 2*k2 + 2*k3 + k4)
     
     def replay_trajectory(self, trajectory: OptimalTrajectory) -> LapResult:
-        """
-        Replay an offline-computed trajectory without MPC.
-        
-        Useful for validating the offline solution.
-        """
-        
-        # Directly use the offline solution as the result
-        n = trajectory.n_points
-        
+        """Replay an offline trajectory without simulation"""
         return LapResult(
             times=trajectory.t_opt,
             positions=trajectory.s,
@@ -236,70 +221,72 @@ class LapSimulator:
             energy_recovered=trajectory.energy_recovered,
             completed=True,
         )
-        
 
-def compare_strategies(vehicle_model: VehicleDynamicsModel,
-                       track_model: F1TrackModel,
+# class RaceSimulator:
+#     """Multi-lap race simulation"""
+    
+#     def __init__(self, vehicle_model, track_model):
+#         self.vehicle = vehicle_model
+#         self.track = track_model
+    
+#     def simulate_race(self, n_laps: int, controller,
+#                       initial_soc: float = 0.5) -> List[LapResult]:
+#         raise NotImplementedError()
+
+def compare_strategies(vehicle_model,
+                       track_model,
                        offline_trajectory: OptimalTrajectory,
-                       mpc_controller,
-                       baseline_controller,
-                       initial_soc: float = 0.5) -> Dict:
+                       controllers: Dict,
+                       initial_soc: float = 0.5) -> Dict[str, LapResult]:
     """
-    Compare different control strategies.
+    Compare multiple control strategies.
     
-    Returns a dictionary with results from:
-    - Offline optimal (theoretical best)
-    - MPC tracking (practical implementation)
-    - Rule-based (simple baseline)
+    Args:
+        vehicle_model: VehicleDynamicsModel
+        track_model: F1TrackModel
+        offline_trajectory: Reference trajectory
+        controllers: Dict of name -> controller
+        initial_soc: Starting SOC
+        
+    Returns:
+        Dict of name -> LapResult
     """
-    
     print("\n" + "="*60)
     print("STRATEGY COMPARISON")
     print("="*60)
     
     results = {}
     
-    # 1. Offline optimal (just replay)
-    print("\n1. Evaluating offline optimal solution...")
+    # Offline optimal (replay)
+    print("\n1. Evaluating offline optimal...")
     simulator = LapSimulator(vehicle_model, track_model, None)
     results['offline'] = simulator.replay_trajectory(offline_trajectory)
-    print(f"   Lap time: {results['offline'].lap_time:.3f} s")
+    print(f"   Lap time: {results['offline'].lap_time:.3f}s")
     
-    # 2. MPC tracking
-    print("\n2. Running MPC simulation...")
-    mpc_controller.set_reference(offline_trajectory)
-    mpc_simulator = LapSimulator(vehicle_model, track_model, mpc_controller)
-    results['mpc'] = mpc_simulator.simulate_lap(
-        initial_soc=initial_soc,
-        reference=offline_trajectory
-    )
-    print(f"   Lap time: {results['mpc'].lap_time:.3f} s")
-    print(f"   Solve success rate: {np.mean(results['mpc'].solve_success)*100:.1f}%")
-    
-    # 3. Rule-based baseline
-    print("\n3. Running rule-based simulation...")
-    baseline_simulator = LapSimulator(vehicle_model, track_model, baseline_controller)
-    results['baseline'] = baseline_simulator.simulate_lap(initial_soc=initial_soc)
-    print(f"   Lap time: {results['baseline'].lap_time:.3f} s")
+    # Each controller
+    for i, (name, controller) in enumerate(controllers.items(), 2):
+        print(f"\n{i}. Running {name}...")
+        
+        sim = LapSimulator(vehicle_model, track_model, controller)
+        results[name] = sim.simulate_lap(
+            initial_soc=initial_soc,
+            reference=offline_trajectory
+        )
+        
+        print(f"   Lap time: {results[name].lap_time:.3f}s")
+        if results[name].solve_success is not None:
+            success_rate = np.mean(results[name].solve_success) * 100
+            print(f"   Success rate: {success_rate:.1f}%")
     
     # Summary
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
-    print(f"{'Strategy':<20} {'Lap Time (s)':<15} {'Final SOC (%)':<15} {'Status'}")
-    print("-"*60)
+    print(f"{'Strategy':<15} {'Lap Time':<12} {'Final SOC':<12} {'Status'}")
+    print("-"*50)
     
     for name, result in results.items():
         status = "✓" if result.completed else "✗"
-        print(f"{name:<20} {result.lap_time:<15.3f} {result.final_soc*100:<15.1f} {status}")
-    
-    # Improvements
-    baseline_time = results['baseline'].lap_time
-    mpc_improvement = baseline_time - results['mpc'].lap_time
-    offline_improvement = baseline_time - results['offline'].lap_time
-    
-    print(f"\nMPC vs Baseline:     {mpc_improvement:+.3f} s ({mpc_improvement/baseline_time*100:+.2f}%)")
-    print(f"Offline vs Baseline: {offline_improvement:+.3f} s ({offline_improvement/baseline_time*100:+.2f}%)")
-    print(f"MPC tracking gap:    {results['mpc'].lap_time - results['offline'].lap_time:.3f} s")
+        print(f"{name:<15} {result.lap_time:<12.3f} {result.final_soc*100:<12.1f}% {status}")
     
     return results

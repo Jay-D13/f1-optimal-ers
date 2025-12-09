@@ -1,0 +1,36 @@
+{
+  "metadata": {
+    "track": "Monaco",
+    "year": 2024,
+    "driver": null,
+    "timestamp": "2025-12-03T21:36:55.481855",
+    "solver": "nlp",
+    "initial_soc": 0.5,
+    "final_soc_min": 0.3
+  },
+  "track_info": {
+    "total_length": 3264.963819601941,
+    "n_segments": 653,
+    "ds": 5.0
+  },
+  "performance": {
+    "lap_time": 62.83162128077939,
+    "lap_time_no_ers": 65.98550602367484,
+    "time_improvement": 3.153884742895457,
+    "solver_status": "suboptimal",
+    "solve_time": 224.90158462524414
+  },
+  "energy": {
+    "initial_soc": 0.5,
+    "final_soc": 0.3056987411807895,
+    "total_deployed_MJ": 2.5725510628943162,
+    "total_recovered_MJ": 2.1571112150716685,
+    "net_energy_MJ": 0.41543984782264803,
+    "energy_efficiency": 0.8385105532734319
+  },
+  "velocity_stats": {
+    "max_speed_kmh": 276.1787093750465,
+    "min_speed_kmh": 62.71614755050483,
+    "avg_speed_kmh": 206.34554293832508
+  }
+}

@@ -1,5 +1,5 @@
 from .track import F1TrackModel, TrackSegment, TrackData
-from .dynamics import VehicleDynamicsModel
+from .vehicle_dynamics import VehicleDynamicsModel
 
 __all__ = [
     'F1TrackModel', 

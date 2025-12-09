@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Optional
 import time
 
 from models import VehicleDynamicsModel, F1TrackModel
-from .offline_optimizer import OptimalTrajectory
+from ..controllers.offline_optimizer import OptimalTrajectory
 
 
 class OnlineMPController:

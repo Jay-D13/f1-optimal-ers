@@ -1,3 +1,4 @@
+import argparse
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
@@ -5,449 +6,319 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import ERSConfig, VehicleConfig
+from solvers import (
+    ForwardBackwardSolver,
+    SpatialNLPSolver,
+    OptimalTrajectory,
+)
 from models import F1TrackModel, VehicleDynamicsModel
-from controllers import GlobalOfflineOptimizer, OnlineMPController, SimpleRuleBasedStrategy, PureGreedyStrategy, ApexVelocitySolver
-from simulation import LapSimulator, compare_strategies
-from utils import (
-    plot_lap_results, 
-    plot_strategy_comparison,
-    plot_track_with_ers,
-    plot_offline_solution,
+from config import ERSConfig, VehicleConfig
+from utils import RunManager, export_results
+from visualization import (
     visualize_track,
+    plot_offline_solution,
+    create_comparison_plot,
     visualize_lap_animated,
-    plot_results
+    plot_simple_results
 )
 
 
-# def main():
-#     """Main execution function for hierarchical ERS optimization"""
+def main(args):
+    """Main execution function."""
     
-#     print("="*70)
-#     print("  F1 ERS OPTIMAL CONTROL - HIERARCHICAL APPROACH")
-#     print("="*70)
-#     print("\nThis implementation follows the literature approach:")
-#     print("  1. Offline Global Optimization (Spatial-domain NLP)")
-#     print("  2. Online MPC Tracking (Time-domain NMPC)")
-#     print("="*70)
-    
-#     # =========================================================================
-#     # STEP 1: Configuration
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 1: CONFIGURATION")
-#     print("="*70)
-    
-#     ers_config = ERSConfig()
-#     vehicle_config = VehicleConfig.for_monaco()
-    
-#     print(f"\nERS Configuration:")
-#     print(f"  Max deployment power: {ers_config.max_deployment_power/1000:.0f} kW")
-#     print(f"  Max recovery power:   {ers_config.max_recovery_power/1000:.0f} kW")
-#     print(f"  Battery capacity:     {ers_config.battery_capacity/1e6:.1f} MJ")
-#     print(f"  Usable energy/lap:    {ers_config.battery_usable_energy/1e6:.1f} MJ")
-    
-#     print(f"\nVehicle Configuration (Monaco):")
-#     print(f"  Mass:       {vehicle_config.mass:.0f} kg")
-#     print(f"  Cd:         {vehicle_config.cd:.2f}")
-#     print(f"  Cl:         {vehicle_config.cl:.2f}")
-#     print(f"  ICE Power:  {vehicle_config.max_ice_power/1000:.0f} kW")
-    
-#     # =========================================================================
-#     # STEP 2: Load Track Data
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 2: TRACK DATA LOADING")
-#     print("="*70)
-    
-#     track_name = 'Monaco'
-#     year = 2025
-    
-#     print(f"\nLoading {year} {track_name} GP track data...")
-    
-#     track = F1TrackModel(year, track_name, 'Q', ds=5.0)
-    
-#     try:
-#         track.load_from_fastf1('NOR')  
-#         # track.load_from_fastf1('VER') # DU DU DU DUHUU MAX VERSTAPPEN
-#         print("   ✓ Loaded real track data from FastF1")
-#     except Exception as e:
-#         print(f"   ⚠ FastF1 load failed: {e}")
-#         print("   Make sure FastF1 is installed and data is cached.")
-#         return
+    print("="*70)
+    print("  F1 ERS OPTIMAL CONTROL")
+    print("="*70)
 
-#     print("\n   Generating track visualization...")
-#     visualize_track(track, track_name=track_name, driver_name='Norris', save_path=f'visualization/{track_name.lower()}_analysis.png')
-#     # return 
+    run_manager = RunManager(args.track, base_dir="results")
+    
+    # =========================================================================
+    print("\n" + "="*70)
+    print("CONFIGURATION")
+    print("="*70)
+    
+    ers_config = ERSConfig()
+    
+    # Vehicle config (track-specific)
+    track_configs = {
+        'monaco': VehicleConfig.for_monaco,
+        'monza': VehicleConfig.for_monza,
+        'montreal': VehicleConfig.for_montreal,
+        'spa': VehicleConfig.for_spa,
+        'silverstone': VehicleConfig.for_silverstone,
+    }
+    
+    vehicle_config = track_configs.get(
+        args.track.lower(), 
+        lambda: VehicleConfig()
+    )()
+    
+    print(f"\nTrack: {args.track}")
+    print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
+          f"{ers_config.battery_usable_energy/1e6:.1f}MJ/lap limit")
+    print(f"Vehicle: Cd={vehicle_config.cd}, Cl={vehicle_config.cl}")
+    
+    # =========================================================================
+    print("\n" + "="*70)
+    print("LOAD TRACK")
+    print("="*70)
+    
+    track = F1TrackModel(year=args.year, gp=args.track, ds=5.0)
+    
+    # Try TUMFTM raceline first, fallback to FastF1
+    tumftm_path = Path(f'data/racelines/{args.track.lower()}.csv')
+    
+    if tumftm_path.exists() and args.use_tumftm:
+        print(f"   Loading TUMFTM raceline: {tumftm_path}")
+        track.load_from_tumftm_raceline(str(tumftm_path))
+    else:
+        print(f"   Loading from FastF1 ({args.year} {args.track})...")
+        try:
+            track.load_from_fastf1(driver=args.driver)
+        except Exception as e:
+            print(f"   ⚠ FastF1 failed: {e}")
+            print("   Please provide a TUMFTM raceline or check FastF1 cache.")
+            return
+    
+    print(f"   Track loaded: {track.total_length:.0f}m, {len(track.segments)} segments")
+    
+    v_max = track.compute_speed_limits(vehicle_config)
 
-#     # Compute speed limits with vehicle config
-#     print("\nComputing aerodynamic speed limits...")
-#     v_max = track.compute_speed_limits(vehicle_config)
-#     print(f"   Speed range: {v_max.min()*3.6:.0f} - {v_max.max()*3.6:.0f} km/h")
+    # =========================================================================
+    print("\n" + "="*70)
+    print("CREATE MODELS")
+    print("="*70)
     
-#     # =========================================================================
-#     # STEP 3: Create Models
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 3: MODEL CREATION")
-#     print("="*70)
+    vehicle_model = VehicleDynamicsModel(vehicle_config, ers_config)
+    print("   ✓ Vehicle dynamics model ready")
     
-#     print("\nCreating vehicle dynamics model...")
-#     vehicle_model = VehicleDynamicsModel(vehicle_config, ers_config)
-#     print("   ✓ Vehicle dynamics model ready")
-    
-#     # Verify dynamics sign convention
-#     print("\nVerifying battery dynamics sign convention...")
-#     dynamics = vehicle_model.create_time_domain_dynamics()
-    
-#     # Test: Deployment should decrease SOC
-#     test_state = np.array([0, 50, 0.5])  # s=0, v=50m/s, soc=50%
-#     test_deploy = np.array([100000, 1.0, 0])  # 100kW deployment
-#     test_harvest = np.array([-100000, 0, 0.5])  # 100kW harvest
-    
-#     deploy_result = dynamics(test_state, test_deploy, np.array([0, 1000])).full().flatten()
-#     harvest_result = dynamics(test_state, test_harvest, np.array([0, 1000])).full().flatten()
-    
-#     print(f"   Deploy (100kW):  dsoc/dt = {deploy_result[2]:.6f} (should be < 0)")
-#     print(f"   Harvest (100kW): dsoc/dt = {harvest_result[2]:.6f} (should be > 0)")
-    
-#     if deploy_result[2] >= 0 or harvest_result[2] <= 0:
-#         print("   ⚠ WARNING: Battery dynamics may have incorrect sign!")
-#     else:
-#         print("   ✓ Battery dynamics sign convention verified")
-    
-#     # =========================================================================
-#     # STEP 4: Offline Global Optimization
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 4: OFFLINE GLOBAL OPTIMIZATION (Phase 1)")
-#     print("="*70)
-    
-#     print("\nThis phase solves the minimum-time problem:")
-#     print("  minimize  T = ∫(1/v)ds  over the entire lap")
-#     print("  subject to: vehicle dynamics, energy limits, track constraints")
-    
-#     initial_soc = 0.5  # Start at 50% SOC
-    
-#     offline_optimizer = GlobalOfflineOptimizer(
-#         vehicle_model=vehicle_model,
-#         track_model=track,
-#         ds=5.0  # 5m spatial discretization
-#     )
-    
-#     print("\nSetting up NLP...")
-#     offline_optimizer.setup_nlp(
-#         initial_soc=initial_soc,
-#         final_soc_min=0.3,  # End with at least 30% SOC
-#         energy_limit=4e6    # 4MJ regulatory limit
-#     )
-    
-#     print("\nSolving global optimization (this may take 1-3 minutes)...")
-#     optimal_trajectory = offline_optimizer.solve()
-    
-#     # Plot offline solution
-#     print("\nGenerating offline solution plots...")
-#     fig_offline = plot_offline_solution(
-#         optimal_trajectory,
-#         title=f"Offline Optimal Solution - {track_name}",
-#         save_path="offline_solution.png"
-#     )
-    
-#     # =========================================================================
-#     # STEP 5: Online MPC Controller
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 5: ONLINE MPC CONTROLLER (Phase 2)")
-#     print("="*70)
-    
-#     print("\nThis phase tracks the offline reference in real-time:")
-#     print("  Cost: J = Σ[(v - v_ref)² + (soc - soc_ref)² + Δu²]")
-#     print("  Horizon: ~200m look-ahead")
-    
-#     mpc_controller = OnlineMPController(
-#         vehicle_model=vehicle_model,
-#         track_model=track,
-#         horizon_distance=200.0,  # 200m prediction horizon
-#         dt=0.1                   # 100ms time step
-#     )
-#     mpc_controller.set_reference(optimal_trajectory)
-#     print("   ✓ MPC controller initialized with offline reference")
-    
-#     # =========================================================================
-#     # STEP 6: Baseline Strategy
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 6: BASELINE STRATEGY")
-#     print("="*70)
 
-#     # Pass the models to the baseline so it can do lookahead math
-#     baseline_strategy = PureGreedyStrategy(track, vehicle_config, ers_config)
-#     print("   ✓ Rule-based baseline strategy ready")
+    # =========================================================================
+    print("\n" + "="*70)
+    print("PHASE 1 - VELOCITY PROFILE (Forward-Backward)")
+    print("="*70)
     
-#     # =========================================================================
-#     # STEP 7: Run Simulations
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 7: LAP SIMULATIONS")
-#     print("="*70)
+    # Profile WITHOUT ERS (ICE power only)
+    print("\n   Computing theoretical profile WITHOUT ERS...")
+    fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
+    velocity_profile_no_ers = fb_solver.solve()
     
-#     # Compare all strategies
-#     results = compare_strategies(
-#         vehicle_model=vehicle_model,
-#         track_model=track,
-#         offline_trajectory=optimal_trajectory,
-#         mpc_controller=mpc_controller,
-#         baseline_controller=baseline_strategy,
-#         initial_soc=initial_soc
-#     )
+    # Profile WITH ERS (ICE + ERS power)
+    print("\n   Computing theoretical profile WITH ERS...")
+    fb_solver.use_ers_power = True
+    velocity_profile_with_ers = fb_solver.solve()
     
-#     # =========================================================================
-#     # STEP 8: Visualization
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("STEP 8: GENERATING VISUALIZATIONS")
-#     print("="*70)
+    print(f"\n   Results:")
+    print(f"     No ERS:   {velocity_profile_no_ers.lap_time:.3f}s "
+          f"(v: {velocity_profile_no_ers.v.min()*3.6:.0f}-{velocity_profile_no_ers.v.max()*3.6:.0f} km/h)")
+    print(f"     With ERS: {velocity_profile_with_ers.lap_time:.3f}s "
+          f"(v: {velocity_profile_with_ers.v.min()*3.6:.0f}-{velocity_profile_with_ers.v.max()*3.6:.0f} km/h)")
+    print(f"     Theoretical improvement: {velocity_profile_no_ers.lap_time - velocity_profile_with_ers.lap_time:.3f}s")
+
+    # =========================================================================
+    print("\n" + "="*70)
+    print("PHASE 2 - ERS OPTIMIZATION (Spatial NLP)")
+    print("="*70)
     
-#     # Plot results
-#     for name, result in results.items():
-#         # Convert to dict format for plot_results
-#         result_dict = {
-#             'times': result.times,
-#             'states': result.states,
-#             'controls': result.controls,
-#             'lap_time': result.lap_time,
-#             'completed': result.completed,
-#         }
-#         fig = plot_results(result_dict, f"{name.upper()} Strategy - {track_name}")
-#         fig.savefig(f'{name}_results.png', dpi=150, bbox_inches='tight')
-#         print(f"   ✓ Saved {name}_results.png")
+    nlp_solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
     
-#     # Animation for MPC
-#     if 'mpc' in results:
-#         print("\n   Creating animation...")
-#         result_dict = {
-#             'times': results['mpc'].times,
-#             'states': results['mpc'].states,
-#         }
-#         try:
-#             fig_anim, anim = visualize_lap_animated(
-#                 track, result_dict, "MPC", 'mpc_lap_animation.gif'
-#             )
-#         except Exception as e:
-#             print(f"   Could not create animation: {e}")
+    # Use the WITH-ERS velocity limit for optimization
+    optimal_trajectory = nlp_solver.solve(
+        v_limit_profile=velocity_profile_with_ers.v,#v_max,
+        initial_soc=args.initial_soc,
+        final_soc_min=args.final_soc_min,
+        energy_limit=ers_config.deployment_limit_per_lap,
+    )
     
-#     # Individual result plots
-#     for name, result in results.items():
-#         fig = plot_lap_results(
-#             result,
-#             title=f"{name.upper()} Strategy Results - {track_name}",
-#             save_path=f"{name}_results.png"
-#         )
+    # =========================================================================
+    print("\n" + "="*70)
+    print("RESULTS SUMMARY")
+    print("="*70)
     
-#     # Comparison plot
-#     fig_comparison = plot_strategy_comparison(
-#         results,
-#         title=f"Strategy Comparison - {track_name}",
-#         save_path="strategy_comparison.png"
-#     )
+    energy_stats = optimal_trajectory.compute_energy_stats()
     
-#     # Track visualization with ERS
-#     if results.get('mpc'):
-#         fig_track = plot_track_with_ers(
-#             track,
-#             results['mpc'],
-#             title=f"Track Analysis with MPC ERS Strategy - {track_name}",
-#             save_path="track_ers_analysis.png"
-#         )
+    summary_text = f"""
+        {'='*70}
+        F1 ERS OPTIMIZATION RESULTS - {args.track.upper()}
+        {'='*70}
+
+        TRACK INFORMATION:
+        Track:              {args.track}
+        Year:               {args.year}
+        Total Length:       {track.total_length:.0f} m
+        Number of Segments: {len(track.segments)}
+
+        LAP TIME PERFORMANCE:
+        Lap Time (No ERS):      {velocity_profile_no_ers.lap_time:.3f} s
+        Lap Time (With ERS):    {velocity_profile_with_ers.lap_time:.3f} s
+        Lap Time (Optimal):     {optimal_trajectory.lap_time:.3f} s
+        
+        Improvement vs No ERS:  {velocity_profile_no_ers.lap_time - optimal_trajectory.lap_time:.3f} s ({((velocity_profile_no_ers.lap_time - optimal_trajectory.lap_time) / velocity_profile_no_ers.lap_time * 100):.2f}%)
+        Gap to Theoretical:     {optimal_trajectory.lap_time - velocity_profile_with_ers.lap_time:.3f} s
+
+        SOLVER INFORMATION:
+        Status:                 {optimal_trajectory.solver_status}
+        Solve Time:             {optimal_trajectory.solve_time:.2f} s
+        Solver Type:            {args.solver}
+
+        ENERGY MANAGEMENT:
+        Initial SOC:            {energy_stats['initial_soc']*100:.1f}%
+        Final SOC:              {energy_stats['final_soc']*100:.1f}%
+        Energy Deployed:        {energy_stats['total_deployed_MJ']:.3f} MJ
+        Energy Recovered:       {energy_stats['total_recovered_MJ']:.3f} MJ
+        Net Energy Used:        {energy_stats['net_energy_MJ']:.3f} MJ
+        Recovery Efficiency:    {(energy_stats['total_recovered_MJ'] / max(energy_stats['total_deployed_MJ'], 1e-6) * 100):.1f}%
+
+        VELOCITY STATISTICS:
+        No ERS Profile:         {velocity_profile_no_ers.v.min()*3.6:.0f} - {velocity_profile_no_ers.v.max()*3.6:.0f} km/h
+        With ERS Profile:       {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
+        Optimal Strategy:       {optimal_trajectory.v_opt.min()*3.6:.0f} - {optimal_trajectory.v_opt.max()*3.6:.0f} km/h (avg: {optimal_trajectory.v_opt.mean()*3.6:.0f} km/h)
+
+        {'='*70}
+    """
     
-#     # =========================================================================
-#     # STEP 9: Summary
-#     # =========================================================================
-#     print("\n" + "="*70)
-#     print("PROJECT COMPLETE - SUMMARY")
-#     print("="*70)
+    print(summary_text)
+    run_manager.save_summary(summary_text)
     
-#     print(f"\n{'Strategy':<15} {'Lap Time (s)':<15} {'Final SOC (%)':<15} {'Energy (MJ)':<15}")
-#     print("-"*60)
+    # =========================================================================
+    print("\n" + "="*70)
+    print("SAVING DATA")
+    print("="*70)
     
-#     for name, result in results.items():
-#         net_energy = (result.energy_deployed - result.energy_recovered) / 1e6
-#         print(f"{name:<15} {result.lap_time:<15.3f} {result.final_soc*100:<15.1f} {net_energy:<15.2f}")
+    results_dict = export_results(
+        optimal_trajectory, velocity_profile_no_ers, track, args
+    )
+    run_manager.save_json(results_dict, 'results_summary')
     
-#     print("\nKey Insights:")
-#     if 'mpc' in results and 'baseline' in results:
-#         improvement = results['baseline'].lap_time - results['mpc'].lap_time
-#         print(f"  • MPC improvement over baseline: {improvement:.3f}s ({improvement/results['baseline'].lap_time*100:.2f}%)")
+    # Save numpy arrays for detailed analysis
+    run_manager.save_numpy(optimal_trajectory.s, 'distance')
+    run_manager.save_numpy(optimal_trajectory.v_opt, 'velocity_optimal')
+    run_manager.save_numpy(velocity_profile_no_ers.v, 'velocity_no_ers')
+    run_manager.save_numpy(velocity_profile_with_ers.v, 'velocity_with_ers')
+    run_manager.save_numpy(optimal_trajectory.soc_opt, 'soc_optimal')
+    run_manager.save_numpy(optimal_trajectory.P_ers_opt, 'ers_power')
+    run_manager.save_numpy(optimal_trajectory.throttle_opt, 'throttle')
+    run_manager.save_numpy(optimal_trajectory.brake_opt, 'brake')
     
-#     if 'offline' in results and 'mpc' in results:
-#         tracking_gap = results['mpc'].lap_time - results['offline'].lap_time
-#         print(f"  • MPC tracking gap from optimal: {tracking_gap:.3f}s")
+    # =========================================================================
+    if args.plot:
+        print("\n" + "="*70)
+        print("GENERATING PLOTS")
+        print("="*70)
+        
+        # Track visualization
+        print("\n Track Visualization...")
+        fig_track = visualize_track( # TODO put driver name on plot and fix curves
+            track, 
+            track_name=args.track,
+            driver_name=args.driver
+        )
+        run_manager.save_plot(fig_track, '01_track_analysis')
+        plt.close(fig_track)
+        
+        # Offline solution (reusing existing function)
+        print("\n Offline Solution...")
+        fig_offline = plot_offline_solution(
+            optimal_trajectory,
+            title=f"{args.track} - Offline Optimal Solution"
+        )
+        run_manager.save_plot(fig_offline, '02_offline_solution')
+        plt.close(fig_offline)
+        
+        # Comprehensive comparison (with/without ERS)
+        print("\n ERS Comparison Analysis...")
+        fig_comparison = create_comparison_plot(
+            track,
+            velocity_profile_no_ers.v,
+            velocity_profile_with_ers.v,
+            optimal_trajectory,
+            args.track
+        )
+        run_manager.save_plot(fig_comparison, '03_ers_comparison')
+        plt.close(fig_comparison)
+        
+        # Simple results plot
+        print("\n Simple Results...")
+        fig_simple = plot_simple_results(
+            optimal_trajectory, 
+            velocity_profile_no_ers, 
+            track, 
+            args.track
+        )
+        run_manager.save_plot(fig_simple, '04_simple_results')
+        plt.close(fig_simple)
+        
+        # Animation (optional, can be slow)
+        if args.save_animation:
+            print("\n Creating Animation (this may take a while)...")
+            results_dict_for_anim = {
+                'times': optimal_trajectory.t_opt,
+                'states': np.column_stack([
+                    optimal_trajectory.s,
+                    optimal_trajectory.v_opt,
+                    optimal_trajectory.soc_opt
+                ]),
+                'controls': np.column_stack([
+                    optimal_trajectory.P_ers_opt,
+                    optimal_trajectory.throttle_opt,
+                    optimal_trajectory.brake_opt
+                ]),
+                'lap_time': optimal_trajectory.lap_time,
+                'completed': True
+            }
+            
+            animation_path = run_manager.plots_dir / "05_lap_animation.gif"
+            fig_anim, anim = visualize_lap_animated(
+                track,
+                results_dict_for_anim,
+                strategy_name="Optimal ERS",
+                save_path=str(animation_path)
+            )
+            print(f"   ✓ Saved 05_lap_animation.gif")
+            plt.close(fig_anim)
+        
+        print("\n✓ All plots saved!")
     
-#     print(f"\nOutput files saved:")
-#     print("  • offline_solution.png    - Global optimal trajectory")
-#     print("  • mpc_results.png         - MPC simulation results")
-#     print("  • baseline_results.png    - Rule-based baseline results")
-#     print("  • strategy_comparison.png - Side-by-side comparison")
-#     print("  • track_ers_analysis.png  - ERS on track map")
+    print("\n" + "="*70)
+    print("  COMPLETE")
+    print("="*70)
+    print(f"\n📁 All results saved to: {run_manager.run_dir}")
     
-#     # Show plots
-#     plt.show()
-    
-#     print("\n" + "="*70)
-#     print("  END OF F1 ERS OPTIMIZATION")
-#     print("="*70)
-    
-#     return results
+    return optimal_trajectory, run_manager
 
 
 if __name__ == "__main__":
-    track = F1TrackModel(2025, 'Monaco')
-    track.load_from_fastf1()
-    ers_config = ERSConfig()
-    vehicle_config = VehicleConfig.for_monaco()
-    vehicle = VehicleDynamicsModel(vehicle_config, ers_config)
-    initial_soc = 0.5
-    track_name = 'Monaco'
-
-    # Phase 1 (NumPy - Fast)
-    velocity_solver = ApexVelocitySolver(vehicle, track)
-    phase1_profile = velocity_solver.solve() # Returns v_max array
-
-    # Phase 2 (CasADi - Stable)
-    optimizer = GlobalOfflineOptimizer(vehicle, track) # TODO still doesn't converge but hey gets results
-    optimizer.setup_nlp(
-        v_limit_profile=phase1_profile.v,
-        initial_soc=0.5,
-        energy_limit=4e6
-    )
-    optimal_trajectory = optimizer.solve()
-    
-    print("\n" + "="*70)
-    print("STEP 5: ONLINE MPC CONTROLLER (Phase 2)")
-    print("="*70)
-    
-    print("\nThis phase tracks the offline reference in real-time:")
-    print("  Cost: J = Σ[(v - v_ref)² + (soc - soc_ref)² + Δu²]")
-    print("  Horizon: ~200m look-ahead")
-    
-    mpc_controller = OnlineMPController( # TODO MPC still fails a lot (uses fallback A LOT) need to tune
-        vehicle_model=vehicle,
-        track_model=track,
-        horizon_distance=200.0,  # 200m prediction horizon
-        dt=0.1                   # 100ms time step
-    )
-    mpc_controller.set_reference(optimal_trajectory)
-    print("   ✓ MPC controller initialized with offline reference")
-    
-    # =========================================================================
-    # STEP 7: Run Simulations
-    # =========================================================================
-    print("\n" + "="*70)
-    print("STEP 7: LAP SIMULATIONS")
-    print("="*70)
-    
-    # Compare all strategies
-    results = compare_strategies(
-        vehicle_model=vehicle,
-        track_model=track,
-        offline_trajectory=optimal_trajectory,
-        mpc_controller=mpc_controller,
-        baseline_controller=PureGreedyStrategy(track, vehicle_config, ers_config),
-        initial_soc=initial_soc
+    parser = argparse.ArgumentParser(
+        description='F1 ERS Optimal Control',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+            Examples:
+            python main.py --track Monaco --plot
+            python main.py --track Monza --initial-soc 0.6 --plot --save-animation
+            python main.py --track Spa --year 2023 --driver VER --plot
+        """
     )
     
-    # =========================================================================
-    # STEP 8: Visualization
-    # =========================================================================
-    print("\n" + "="*70)
-    print("STEP 8: GENERATING VISUALIZATIONS")
-    print("="*70)
+    parser.add_argument('--track', type=str, default='Monaco',
+                        help='Track name (e.g., Monaco, Monza, Spa)')
+    parser.add_argument('--year', type=int, default=2024,
+                        help='Season year for FastF1 data')
+    parser.add_argument('--driver', type=str, default=None,
+                        help='Driver code for FastF1 (e.g., VER, HAM)')
+    parser.add_argument('--initial-soc', type=float, default=0.5,
+                        help='Initial battery SOC (0.0-1.0)')
+    parser.add_argument('--final-soc-min', type=float, default=0.3,
+                        help='Minimum final SOC (0.0-1.0)')
+    parser.add_argument('--use-tumftm', action='store_true',
+                        help='Prefer TUMFTM raceline if available')
+    parser.add_argument('--plot', action='store_true', default=True,
+                        help='Generate plots')
+    parser.add_argument('--save-animation', action='store_true',
+                        help='Save lap animation (slow, optional)')
+    parser.add_argument('--solver', type=str, default='nlp',
+                        choices=['nlp', 'ecms', 'pmp', 'mpcc'],
+                        help='Solver to use (nlp is fully implemented)')
     
-    # Plot results
-    for name, result in results.items():
-        # Convert to dict format for plot_results
-        result_dict = {
-            'times': result.times,
-            'states': result.states,
-            'controls': result.controls,
-            'lap_time': result.lap_time,
-            'completed': result.completed,
-        }
-        fig = plot_results(result_dict, f"{name.upper()} Strategy - {track_name}")
-        fig.savefig(f'{name}_results.png', dpi=150, bbox_inches='tight')
-        print(f"   ✓ Saved {name}_results.png")
+    args = parser.parse_args()
     
-    # Animation for MPC
-    if 'mpc' in results:
-        print("\n   Creating animation...")
-        result_dict = {
-            'times': results['mpc'].times,
-            'states': results['mpc'].states,
-        }
-        try:
-            fig_anim, anim = visualize_lap_animated(
-                track, result_dict, "MPC", 'mpc_lap_animation.gif'
-            )
-        except Exception as e:
-            print(f"   Could not create animation: {e}")
-    
-    # Individual result plots
-    for name, result in results.items():
-        fig = plot_lap_results(
-            result,
-            title=f"{name.upper()} Strategy Results - {track_name}",
-            save_path=f"{name}_results.png"
-        )
-    
-    # Comparison plot
-    fig_comparison = plot_strategy_comparison(
-        results,
-        title=f"Strategy Comparison - {track_name}",
-        save_path="strategy_comparison.png"
-    )
-    
-    # Track visualization with ERS
-    if results.get('mpc'):
-        fig_track = plot_track_with_ers(
-            track,
-            results['mpc'],
-            title=f"Track Analysis with MPC ERS Strategy - {track_name}",
-            save_path="track_ers_analysis.png"
-        )
-    
-    # =========================================================================
-    # STEP 9: Summary
-    # =========================================================================
-    print("\n" + "="*70)
-    print("PROJECT COMPLETE - SUMMARY")
-    print("="*70)
-    
-    print(f"\n{'Strategy':<15} {'Lap Time (s)':<15} {'Final SOC (%)':<15} {'Energy (MJ)':<15}")
-    print("-"*60)
-    
-    for name, result in results.items():
-        net_energy = (result.energy_deployed - result.energy_recovered) / 1e6
-        print(f"{name:<15} {result.lap_time:<15.3f} {result.final_soc*100:<15.1f} {net_energy:<15.2f}")
-    
-    print("\nKey Insights:")
-    if 'mpc' in results and 'baseline' in results:
-        improvement = results['baseline'].lap_time - results['mpc'].lap_time
-        print(f"  • MPC improvement over baseline: {improvement:.3f}s ({improvement/results['baseline'].lap_time*100:.2f}%)")
-    
-    if 'offline' in results and 'mpc' in results:
-        tracking_gap = results['mpc'].lap_time - results['offline'].lap_time
-        print(f"  • MPC tracking gap from optimal: {tracking_gap:.3f}s")
-    
-    print(f"\nOutput files saved:")
-    print("  • offline_solution.png    - Global optimal trajectory")
-    print("  • mpc_results.png         - MPC simulation results")
-    print("  • baseline_results.png    - Rule-based baseline results")
-    print("  • strategy_comparison.png - Side-by-side comparison")
-    print("  • track_ers_analysis.png  - ERS on track map")
-    
-    # Show plots
-    plt.show()
-    
-    print("\n" + "="*70)
-    print("  END OF F1 ERS OPTIMIZATION")
-    print("="*70)
+    optimal_trajectory, run_manager = main(args)
