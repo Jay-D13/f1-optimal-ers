@@ -1,0 +1,36 @@
+{
+  "metadata": {
+    "track": "Monza",
+    "year": 2024,
+    "driver": null,
+    "timestamp": "2025-12-03T21:28:40.065520",
+    "solver": "nlp",
+    "initial_soc": 0.5,
+    "final_soc_min": 0.3
+  },
+  "track_info": {
+    "total_length": 5754.049409006321,
+    "n_segments": 1151,
+    "ds": 5.0
+  },
+  "performance": {
+    "lap_time": 82.84817175976255,
+    "lap_time_no_ers": 82.40722672513982,
+    "time_improvement": -0.4409450346227288,
+    "solver_status": "suboptimal",
+    "solve_time": 304.1958351135254
+  },
+  "energy": {
+    "initial_soc": 0.5,
+    "final_soc": 0.31242030982907276,
+    "total_deployed_MJ": 2.334214507770804,
+    "total_recovered_MJ": 1.8974325430287704,
+    "net_energy_MJ": 0.4367819647420333,
+    "energy_efficiency": 0.8128783951569368
+  },
+  "velocity_stats": {
+    "max_speed_kmh": 309.0675679133767,
+    "min_speed_kmh": 77.94100592855723,
+    "avg_speed_kmh": 262.55770122425
+  }
+}
