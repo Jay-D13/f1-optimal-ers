@@ -17,7 +17,12 @@ import casadi as ca
 import time
 
 from solvers import BaseSolver, OptimalTrajectory
-
+# At the top of solvers/spatial_nlp.py, add:
+from solvers.costate_extraction import (
+    extract_costates_from_casadi_opti,
+    compute_pmp_analysis,
+    print_pmp_analysis
+)
 
 class SpatialNLPSolver(BaseSolver):
     """
@@ -41,10 +46,11 @@ class SpatialNLPSolver(BaseSolver):
         return "SpatialNLP"
     
     def solve(self,
-              v_limit_profile: np.ndarray,
-              initial_soc: float = 0.5,
-              final_soc_min: float = 0.3,
-              energy_limit: float = 4e6) -> OptimalTrajectory:
+          v_limit_profile: np.ndarray,
+          initial_soc: float = 0.5,
+          final_soc_min: float = 0.3,
+          energy_limit: float = 4e6,
+          extract_costates: bool = False) -> OptimalTrajectory:  # <-- ADD THIS
         """
         velocity is essentially FIXED by grip limits
         We're really just optimizing WHEN to deploy ERS for small speed gains
@@ -67,7 +73,8 @@ class SpatialNLPSolver(BaseSolver):
             v_limit_profile=v_limit_profile,
             initial_soc=initial_soc,
             final_soc_min=final_soc_min,
-            energy_limit=energy_limit
+            energy_limit=energy_limit,
+            extract_costates=extract_costates
         )
         
         trajectory.solve_time = time.time() - start_time
@@ -82,7 +89,8 @@ class SpatialNLPSolver(BaseSolver):
                          v_limit_profile: np.ndarray,
                          initial_soc: float,
                          final_soc_min: float,
-                         energy_limit: float) -> OptimalTrajectory:
+                         energy_limit: float,
+                         extract_costates: bool = False) -> OptimalTrajectory:
         
         opti = ca.Opti()
         
@@ -276,7 +284,7 @@ class SpatialNLPSolver(BaseSolver):
             'ipopt.tol': 1e-5,
             'ipopt.acceptable_tol': 1e-4,
             'ipopt.acceptable_iter': 10,
-            'ipopt.linear_solver': 'ma97',  # use 'mumps' if no license
+            'ipopt.linear_solver': 'mumps',  # use 'mumps' if no license
             'ipopt.warm_start_init_point': 'yes',
             'ipopt.mu_strategy': 'adaptive',
             'ipopt.nlp_scaling_method': 'gradient-based',
@@ -320,13 +328,47 @@ class SpatialNLPSolver(BaseSolver):
                 raise RuntimeError("Failed to extract any solution")
         
         # =====================================================
+        # EXTRACT CO-STATES
+        # =====================================================
+
+        costates = None
+        if extract_costates:
+            self._log("\nExtracting PMP co-states from dual variables...")
+            
+            # Extract dual variables
+            lambda_v, lambda_SOC = extract_costates_from_casadi_opti(
+                opti=opti,
+                V=V,
+                SOC=SOC,
+                N=self.N,
+                ers_config=self.ers,
+                successful_solve=(status == 'optimal')
+            )
+            
+            if lambda_v is not None and lambda_SOC is not None:
+                # Compute PMP analysis
+                costates = compute_pmp_analysis(
+                    s=self.s_grid,
+                    v=v_opt,
+                    P_ers=P_ers_opt,
+                    lambda_v=lambda_v,
+                    lambda_SOC=lambda_SOC,
+                    ers_config=self.ers
+                )
+                
+                # Print analysis
+                print_pmp_analysis(costates)
+            else:
+                self._log("  ⚠ Could not extract co-states")
+
+        # =====================================================
         # BUILD RESULT
         # =====================================================
         
         t_opt, lap_time = self._compute_lap_time(self.s_grid, v_opt)
         energy_deployed, energy_recovered = self._compute_energy_totals(P_ers_opt, v_opt)
         
-        return OptimalTrajectory(
+        trajectory = OptimalTrajectory(
             s=self.s_grid,
             ds=self.ds,
             n_points=self.N + 1,
@@ -343,6 +385,16 @@ class SpatialNLPSolver(BaseSolver):
             solver_status=status,
             solver_name=self.name,
         )
+        
+        # =====================================================
+        # ATTACH CO-STATES TO RESULT
+        # =====================================================
+        
+        # Attach costates if extracted
+        if costates is not None:
+            trajectory.costates = costates
+        
+        return trajectory
     
     def _set_initial_guess(self, opti, V, SOC, P_ERS, THROTTLE, BRAKE,
                            v_limit_profile, initial_soc):
@@ -364,4 +416,3 @@ class SpatialNLPSolver(BaseSolver):
         opti.set_initial(BRAKE, np.zeros(self.N))
         
         self._log(f"Initial guess: v={v_init.min():.0f}-{v_init.max():.0f} m/s")
-

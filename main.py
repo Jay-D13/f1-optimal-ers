@@ -124,10 +124,11 @@ def main(args):
     
     # Use the WITH-ERS velocity limit for optimization
     optimal_trajectory = nlp_solver.solve(
-        v_limit_profile=velocity_profile_with_ers.v,#v_max,
+        v_limit_profile=velocity_profile_with_ers.v,
         initial_soc=args.initial_soc,
         final_soc_min=args.final_soc_min,
         energy_limit=ers_config.deployment_limit_per_lap,
+        extract_costates=args.extract_costates,  # NEW: Pass flag to solver
     )
     
     # =========================================================================
@@ -136,6 +137,30 @@ def main(args):
     print("="*70)
     
     energy_stats = optimal_trajectory.compute_energy_stats()
+    
+    # NEW: Check if costates were extracted
+    costates_info = ""
+    if hasattr(optimal_trajectory, 'costates') and optimal_trajectory.costates is not None:
+        costates = optimal_trajectory.costates
+        costates_info = f"""
+        PMP CO-STATE ANALYSIS:
+        Bang-Bang Control:      {costates.bang_bang_pct:.1f}% (optimal if >90%)
+        ERS Deploy Regions:     {costates.deploy_mask.sum() / len(costates.deploy_mask) * 100:.1f}% of lap
+        ERS Recover Regions:    {costates.recover_mask.sum() / len(costates.recover_mask) * 100:.1f}% of lap
+        ERS Neutral Regions:    {costates.neutral_mask.sum() / len(costates.neutral_mask) * 100:.1f}% of lap
+        lambda_v Range:              [{costates.lambda_v.min():.3e}, {costates.lambda_v.max():.3e}]
+        lambda_SOC Range:            [{costates.lambda_SOC.min():.3e}, {costates.lambda_SOC.max():.3e}]
+        sigma_ERS Range:            [{costates.sigma_ERS.min():.3e}, {costates.sigma_ERS.max():.3e}]
+        """
+        
+        # Interpret shadow price
+        avg_lambda_SOC = np.mean(np.abs(costates.lambda_SOC))
+        if avg_lambda_SOC > 1e-3:
+            costates_info += f"        Battery Energy Value:   HIGH (lambda_SOC = {avg_lambda_SOC:.3e}) - Use sparingly\n"
+        elif avg_lambda_SOC > 1e-6:
+            costates_info += f"        Battery Energy Value:   MODERATE (lambda_SOC = {avg_lambda_SOC:.3e}) - Balanced use\n"
+        else:
+            costates_info += f"        Battery Energy Value:   LOW (lambda_SOC = {avg_lambda_SOC:.3e}) - Deploy aggressively\n"
     
     summary_text = f"""
         {'='*70}
@@ -173,7 +198,7 @@ def main(args):
         No ERS Profile:         {velocity_profile_no_ers.v.min()*3.6:.0f} - {velocity_profile_no_ers.v.max()*3.6:.0f} km/h
         With ERS Profile:       {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
         Optimal Strategy:       {optimal_trajectory.v_opt.min()*3.6:.0f} - {optimal_trajectory.v_opt.max()*3.6:.0f} km/h (avg: {optimal_trajectory.v_opt.mean()*3.6:.0f} km/h)
-
+{costates_info}
         {'='*70}
     """
     
@@ -188,6 +213,21 @@ def main(args):
     results_dict = export_results(
         optimal_trajectory, velocity_profile_no_ers, track, args
     )
+    
+    # NEW: Add costate data to results_dict if available
+    if hasattr(optimal_trajectory, 'costates') and optimal_trajectory.costates is not None:
+        costates = optimal_trajectory.costates
+        results_dict['pmp_analysis'] = {
+            'bang_bang_pct': float(costates.bang_bang_pct),
+            'deploy_pct': float(costates.deploy_mask.sum() / len(costates.deploy_mask) * 100),
+            'recover_pct': float(costates.recover_mask.sum() / len(costates.recover_mask) * 100),
+            'neutral_pct': float(costates.neutral_mask.sum() / len(costates.neutral_mask) * 100),
+            'lambda_v_range': [float(costates.lambda_v.min()), float(costates.lambda_v.max())],
+            'lambda_SOC_range': [float(costates.lambda_SOC.min()), float(costates.lambda_SOC.max())],
+            'sigma_ERS_range': [float(costates.sigma_ERS.min()), float(costates.sigma_ERS.max())],
+            'avg_lambda_SOC': float(np.mean(np.abs(costates.lambda_SOC))),
+        }
+    
     run_manager.save_json(results_dict, 'results_summary')
     
     # Save numpy arrays for detailed analysis
@@ -200,6 +240,19 @@ def main(args):
     run_manager.save_numpy(optimal_trajectory.throttle_opt, 'throttle')
     run_manager.save_numpy(optimal_trajectory.brake_opt, 'brake')
     
+    # NEW: Save costate arrays if available
+    if hasattr(optimal_trajectory, 'costates') and optimal_trajectory.costates is not None:
+        costates = optimal_trajectory.costates
+        print("\n   Saving PMP co-state data...")
+        run_manager.save_numpy(costates.lambda_v, 'costate_lambda_v')
+        run_manager.save_numpy(costates.lambda_SOC, 'costate_lambda_SOC')
+        run_manager.save_numpy(costates.sigma_ERS, 'costate_sigma_ERS')
+        run_manager.save_numpy(costates.lambda_kin, 'costate_lambda_kin')
+        run_manager.save_numpy(costates.deploy_mask.astype(int), 'costate_deploy_mask')
+        run_manager.save_numpy(costates.recover_mask.astype(int), 'costate_recover_mask')
+        run_manager.save_numpy(costates.neutral_mask.astype(int), 'costate_neutral_mask')
+        print("   ✓ Co-state arrays saved")
+    
     # =========================================================================
     if args.plot:
         print("\n" + "="*70)
@@ -207,8 +260,8 @@ def main(args):
         print("="*70)
         
         # Track visualization
-        print("\n Track Visualization...")
-        fig_track = visualize_track( # TODO put driver name on plot and fix curves
+        print("\n   Track Visualization...")
+        fig_track = visualize_track(
             track, 
             track_name=args.track,
             driver_name=args.driver
@@ -217,7 +270,7 @@ def main(args):
         plt.close(fig_track)
         
         # Offline solution (reusing existing function)
-        print("\n Offline Solution...")
+        print("\n   Offline Solution...")
         fig_offline = plot_offline_solution(
             optimal_trajectory,
             title=f"{args.track} - Offline Optimal Solution"
@@ -226,7 +279,7 @@ def main(args):
         plt.close(fig_offline)
         
         # Comprehensive comparison (with/without ERS)
-        print("\n ERS Comparison Analysis...")
+        print("\n   ERS Comparison Analysis...")
         fig_comparison = create_comparison_plot(
             track,
             velocity_profile_no_ers.v,
@@ -238,7 +291,7 @@ def main(args):
         plt.close(fig_comparison)
         
         # Simple results plot
-        print("\n Simple Results...")
+        print("\n   Simple Results...")
         fig_simple = plot_simple_results(
             optimal_trajectory, 
             velocity_profile_no_ers, 
@@ -248,9 +301,27 @@ def main(args):
         run_manager.save_plot(fig_simple, '04_simple_results')
         plt.close(fig_simple)
         
+        # NEW: Co-state visualization if available
+        if hasattr(optimal_trajectory, 'costates') and optimal_trajectory.costates is not None:
+            print("\n   PMP Co-state Analysis...")
+            try:
+                from visualization import plot_costate_analysis
+                fig_costates = plot_costate_analysis(
+                    optimal_trajectory.costates,
+                    track,
+                    args.track
+                )
+                run_manager.save_plot(fig_costates, '05_pmp_costates')
+                plt.close(fig_costates)
+                print("   ✓ Co-state plot saved")
+            except ImportError:
+                print("   ⚠ plot_costate_analysis not found in visualization module")
+            except Exception as e:
+                print(f"   ⚠ Could not create co-state plot: {e}")
+        
         # Animation (optional, can be slow)
         if args.save_animation:
-            print("\n Creating Animation (this may take a while)...")
+            print("\n   Creating Animation (this may take a while)...")
             results_dict_for_anim = {
                 'times': optimal_trajectory.t_opt,
                 'states': np.column_stack([
@@ -267,14 +338,14 @@ def main(args):
                 'completed': True
             }
             
-            animation_path = run_manager.plots_dir / "05_lap_animation.gif"
+            animation_path = run_manager.plots_dir / "06_lap_animation.gif"
             fig_anim, anim = visualize_lap_animated(
                 track,
                 results_dict_for_anim,
                 strategy_name="Optimal ERS",
                 save_path=str(animation_path)
             )
-            print(f"   ✓ Saved 05_lap_animation.gif")
+            print(f"   ✓ Saved 06_lap_animation.gif")
             plt.close(fig_anim)
         
         print("\n✓ All plots saved!")
@@ -296,6 +367,7 @@ if __name__ == "__main__":
             python main.py --track Monaco --plot
             python main.py --track Monza --initial-soc 0.6 --plot --save-animation
             python main.py --track Spa --year 2023 --driver VER --plot
+            python main.py --track Monaco --extract-costates --plot
         """
     )
     
@@ -318,6 +390,8 @@ if __name__ == "__main__":
     parser.add_argument('--solver', type=str, default='nlp',
                         choices=['nlp', 'ecms', 'pmp', 'mpcc'],
                         help='Solver to use (nlp is fully implemented)')
+    parser.add_argument('--extract-costates', action='store_true', default=True,
+                        help='Extract PMP co-states from solver (default: True)')
     
     args = parser.parse_args()
     

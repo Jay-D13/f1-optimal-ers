@@ -14,4 +14,5 @@ __all__ = [
     'create_comparison_plot',
     'plot_offline_solution',
     'plot_simple_results',
+    'plot_costate_analysis',
     ]

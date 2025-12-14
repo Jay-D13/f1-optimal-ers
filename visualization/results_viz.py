@@ -649,3 +649,205 @@ def create_comparison_plot(track: F1TrackModel,
     plt.tight_layout()
     
     return fig
+
+
+def plot_costate_analysis(costates,
+                         track: F1TrackModel,
+                         track_name: str,
+                         save_path: Optional[str] = None) -> plt.Figure:
+    """
+    Visualize PMP (Pontryagin's Minimum Principle) co-states and switching function.
+    
+    Shows the "shadow prices" that determine optimal ERS deployment:
+    - λ_v: Velocity co-state (how valuable speed is at each point)
+    - λ_SOC: Battery co-state (how valuable battery energy is)
+    - σ_ERS: Switching function (determines deploy vs recover)
+    - λ_kin: Kinetic energy co-state (λ_v × v)
+    
+    Args:
+        costates: CostateProfile from costate_extraction
+        track: F1TrackModel with track geometry
+        track_name: Name of track for title
+        save_path: Optional path to save figure
+    
+    Returns:
+        matplotlib Figure
+    """
+    
+    fig = plt.figure(figsize=(16, 12))
+    
+    s_km = costates.s / 1000
+    
+    # 1. Lambda_v (Velocity co-state)
+    ax1 = plt.subplot(4, 2, 1)
+    ax1.plot(s_km, costates.lambda_v, 'b-', linewidth=1.5)
+    ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
+    ax1.set_ylabel('λ_v (s/m)', fontsize=11)
+    ax1.set_xlabel('Distance (km)')
+    ax1.set_title('Velocity Co-state (Shadow Price of Speed)')
+    ax1.grid(True, alpha=0.3)
+    ax1.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+    
+    # 2. Lambda_SOC (Battery co-state)
+    ax2 = plt.subplot(4, 2, 2)
+    ax2.plot(s_km, costates.lambda_SOC, 'g-', linewidth=1.5)
+    ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
+    ax2.set_ylabel('λ_SOC (s/J)', fontsize=11)
+    ax2.set_xlabel('Distance (km)')
+    ax2.set_title('Battery Co-state (Shadow Price of Energy)')
+    ax2.grid(True, alpha=0.3)
+    ax2.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+    
+    # 3. Switching function σ_ERS with control regions
+    ax3 = plt.subplot(4, 2, 3)
+    
+    # Color by control region
+    deploy_color = 'green'
+    recover_color = 'red'
+    neutral_color = 'gray'
+    
+    # Plot switching function
+    ax3.plot(s_km, costates.sigma_ERS, 'k-', linewidth=1.5, alpha=0.7, label='σ_ERS')
+    ax3.axhline(y=0, color='k', linestyle='--', linewidth=1, alpha=0.5)
+    
+    # Shade regions
+    ax3.fill_between(s_km, 0, costates.sigma_ERS, 
+                     where=costates.deploy_mask,
+                     color=deploy_color, alpha=0.3, label='Deploy (σ > 0)')
+    ax3.fill_between(s_km, 0, costates.sigma_ERS, 
+                     where=costates.recover_mask,
+                     color=recover_color, alpha=0.3, label='Recover (σ < 0)')
+    
+    ax3.set_ylabel('σ_ERS (switching function)', fontsize=11)
+    ax3.set_xlabel('Distance (km)')
+    ax3.set_title('ERS Switching Function (PMP Optimality Condition)')
+    ax3.legend(fontsize=9, loc='best')
+    ax3.grid(True, alpha=0.3)
+    ax3.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+    
+    # 4. Control region breakdown (pie chart)
+    ax4 = plt.subplot(4, 2, 4)
+    
+    total_points = len(costates.sigma_ERS)
+    deploy_pct = costates.deploy_mask.sum() / total_points * 100
+    recover_pct = costates.recover_mask.sum() / total_points * 100
+    neutral_pct = costates.neutral_mask.sum() / total_points * 100
+    
+    sizes = [deploy_pct, recover_pct, neutral_pct]
+    labels = [f'Deploy\n{deploy_pct:.1f}%', 
+              f'Recover\n{recover_pct:.1f}%', 
+              f'Neutral\n{neutral_pct:.1f}%']
+    colors_pie = [deploy_color, recover_color, neutral_color]
+    
+    ax4.pie(sizes, labels=labels, colors=colors_pie, autopct='',
+            startangle=90, textprops={'fontsize': 10})
+    ax4.set_title('Control Region Distribution')
+    
+    # 5. Kinetic energy co-state (λ_kin = λ_v × v)
+    ax5 = plt.subplot(4, 2, 5)
+    ax5.plot(s_km, costates.lambda_kin, 'purple', linewidth=1.5)
+    ax5.axhline(y=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
+    ax5.set_ylabel('λ_kin (s²/m)', fontsize=11)
+    ax5.set_xlabel('Distance (km)')
+    ax5.set_title('Kinetic Energy Co-state (λ_v × v)')
+    ax5.grid(True, alpha=0.3)
+    ax5.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+    
+    # 6. Track curvature reference
+    ax6 = plt.subplot(4, 2, 6)
+    segment_distances = np.array([seg.distance for seg in track.segments])
+    segment_radii = np.array([seg.radius for seg in track.segments])
+    curvature = 1000.0 / np.maximum(segment_radii, 50)
+    
+    ax6.fill_between(segment_distances / 1000, 0, curvature, 
+                     alpha=0.4, color='purple', label='Track curvature')
+    ax6.set_ylabel('Curvature (1/km)', fontsize=11)
+    ax6.set_xlabel('Distance (km)')
+    ax6.set_title('Track Curvature (Reference)')
+    ax6.grid(True, alpha=0.3)
+    
+    # 7. Bang-bang control verification
+    ax7 = plt.subplot(4, 2, 7)
+    
+    # Create bar chart showing optimality
+    categories = ['Bang-Bang\nControl', 'Singular\nArcs']
+    values = [costates.bang_bang_pct, 100 - costates.bang_bang_pct]
+    colors_bar = ['green' if costates.bang_bang_pct > 90 else 'orange', 'gray']
+    
+    bars = ax7.bar(categories, values, color=colors_bar, alpha=0.7)
+    ax7.set_ylabel('Percentage of Lap (%)', fontsize=11)
+    ax7.set_title('PMP Optimality Check')
+    ax7.set_ylim([0, 100])
+    ax7.axhline(y=90, color='r', linestyle='--', alpha=0.5, linewidth=1)
+    
+    # Add value labels on bars
+    for bar, val in zip(bars, values):
+        height = bar.get_height()
+        ax7.text(bar.get_x() + bar.get_width()/2, height + 2,
+                f'{val:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    # Add optimality indicator
+    if costates.bang_bang_pct > 90:
+        ax7.text(0.5, 50, 'âœ" PMP-Optimal\n(>90% bang-bang)', 
+                ha='center', va='center', fontsize=12, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7),
+                transform=ax7.transData)
+    elif costates.bang_bang_pct > 70:
+        ax7.text(0.5, 50, '~ Nearly Optimal\n(>70% bang-bang)', 
+                ha='center', va='center', fontsize=11,
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.7),
+                transform=ax7.transData)
+    else:
+        ax7.text(0.5, 50, 'âš  Suboptimal\n(<70% bang-bang)', 
+                ha='center', va='center', fontsize=11,
+                bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.7),
+                transform=ax7.transData)
+    
+    ax7.grid(True, alpha=0.3, axis='y')
+    
+    # 8. Summary text box
+    ax8 = plt.subplot(4, 2, 8)
+    ax8.axis('off')
+    
+    # Interpret shadow price
+    avg_lambda_SOC = np.mean(np.abs(costates.lambda_SOC))
+    if avg_lambda_SOC > 1e-3:
+        energy_value = "HIGH - Use battery sparingly"
+        energy_color = 'red'
+    elif avg_lambda_SOC > 1e-6:
+        energy_value = "MODERATE - Balanced strategy"
+        energy_color = 'orange'
+    else:
+        energy_value = "LOW - Deploy aggressively"
+        energy_color = 'green'
+    
+    summary = (
+        f"PMP CO-STATE ANALYSIS\n"
+        f"{'='*45}\n\n"
+        f"Optimality Metrics:\n"
+        f"  Bang-Bang Control:    {costates.bang_bang_pct:.1f}%\n"
+        f"  {'  âœ" Optimal (>90%)' if costates.bang_bang_pct > 90 else '  ~ Acceptable (>70%)' if costates.bang_bang_pct > 70 else '  âš  Review formulation'}\n\n"
+        f"Control Structure:\n"
+        f"  Deploy Regions:       {deploy_pct:.1f}%\n"
+        f"  Recover Regions:      {recover_pct:.1f}%\n"
+        f"  Neutral Regions:      {neutral_pct:.1f}%\n\n"
+        f"Shadow Prices (Range):\n"
+        f"  λ_v:    [{costates.lambda_v.min():.2e}, {costates.lambda_v.max():.2e}]\n"
+        f"  λ_SOC:  [{costates.lambda_SOC.min():.2e}, {costates.lambda_SOC.max():.2e}]\n"
+        f"  σ_ERS:  [{costates.sigma_ERS.min():.2e}, {costates.sigma_ERS.max():.2e}]\n\n"
+        f"Battery Energy Value: {energy_value}\n"
+        f"  (|λ_SOC|_avg = {avg_lambda_SOC:.2e})"
+    )
+    
+    ax8.text(0.05, 0.5, summary, fontsize=10, fontfamily='monospace',
+             va='center', ha='left',
+             bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
+    
+    plt.suptitle(f'{track_name} - PMP Co-state Analysis (Pontryagin Optimality)', 
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    
+    return fig
