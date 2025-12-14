@@ -1,0 +1,55 @@
+{
+  "metadata": {
+    "track": "Monaco",
+    "year": 2024,
+    "driver": null,
+    "timestamp": "2025-12-14T02:03:37.172299",
+    "solver": "nlp",
+    "initial_soc": 0.5,
+    "final_soc_min": 0.3
+  },
+  "track_info": {
+    "total_length": 3264.963819601941,
+    "n_segments": 653,
+    "ds": 5.0
+  },
+  "performance": {
+    "lap_time": 64.65094566189808,
+    "lap_time_no_ers": 65.98550602367484,
+    "time_improvement": 1.3345603617767665,
+    "solver_status": "suboptimal",
+    "solve_time": 8.19093918800354
+  },
+  "energy": {
+    "initial_soc": 0.5,
+    "final_soc": 0.3007304689083703,
+    "total_deployed_MJ": 3.048219000302995,
+    "total_recovered_MJ": 2.716878574243741,
+    "net_energy_MJ": 0.33134042605925396,
+    "energy_efficiency": 0.8913003212609335
+  },
+  "velocity_stats": {
+    "max_speed_kmh": 282.7348591133476,
+    "min_speed_kmh": 58.9915994394515,
+    "avg_speed_kmh": 203.8861400526387
+  },
+  "pmp_analysis": {
+    "bang_bang_pct": 0.0,
+    "deploy_pct": 0.0,
+    "recover_pct": 0.0,
+    "neutral_pct": 100.0,
+    "lambda_v_range": [
+      0.0,
+      0.0
+    ],
+    "lambda_SOC_range": [
+      0.0,
+      0.0
+    ],
+    "sigma_ERS_range": [
+      0.0,
+      0.0
+    ],
+    "avg_lambda_SOC": 0.0
+  }
+}

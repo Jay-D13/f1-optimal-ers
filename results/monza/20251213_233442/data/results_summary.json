@@ -1,0 +1,55 @@
+{
+  "metadata": {
+    "track": "Monza",
+    "year": 2024,
+    "driver": null,
+    "timestamp": "2025-12-13T23:58:15.945441",
+    "solver": "nlp",
+    "initial_soc": 0.5,
+    "final_soc_min": 0.3
+  },
+  "track_info": {
+    "total_length": 5761.203716128005,
+    "n_segments": 1153,
+    "ds": 5.0
+  },
+  "performance": {
+    "lap_time": 94.99202551161747,
+    "lap_time_no_ers": 90.17120070721637,
+    "time_improvement": -4.820824804401099,
+    "solver_status": "suboptimal",
+    "solve_time": 1412.8999664783478
+  },
+  "energy": {
+    "initial_soc": 0.5,
+    "final_soc": 0.40585758434135133,
+    "total_deployed_MJ": 1.6164850654829324,
+    "total_recovered_MJ": 1.503257608125954,
+    "net_energy_MJ": 0.11322745735697821,
+    "energy_efficiency": 0.9299545292593526
+  },
+  "velocity_stats": {
+    "max_speed_kmh": 284.2430927836308,
+    "min_speed_kmh": 56.7184516278683,
+    "avg_speed_kmh": 236.35844841951342
+  },
+  "pmp_analysis": {
+    "bang_bang_pct": 99.65307892454467,
+    "deploy_pct": 95.14310494362532,
+    "recover_pct": 4.509973980919341,
+    "neutral_pct": 0.3469210754553339,
+    "lambda_v_range": [
+      -0.01373029951168225,
+      2.4803345093008295
+    ],
+    "lambda_SOC_range": [
+      -0.0028402590396390775,
+      1.6084284291506095
+    ],
+    "sigma_ERS_range": [
+      -0.00017472732390667615,
+      0.13875265988081148
+    ],
+    "avg_lambda_SOC": 0.5994567714974489
+  }
+}

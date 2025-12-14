@@ -821,12 +821,20 @@ def plot_costate_analysis(costates,
         energy_value = "LOW - Deploy aggressively"
         energy_color = 'green'
     
+   # Determine optimality message (fixes nested f-string issue)
+    if costates.bang_bang_pct > 90:
+        optimality_msg = "  ✓ Optimal (>90%)"
+    elif costates.bang_bang_pct > 70:
+        optimality_msg = "  ~ Acceptable (>70%)"
+    else:
+        optimality_msg = "  ⚠ Review formulation"
+    
     summary = (
         f"PMP CO-STATE ANALYSIS\n"
         f"{'='*45}\n\n"
         f"Optimality Metrics:\n"
         f"  Bang-Bang Control:    {costates.bang_bang_pct:.1f}%\n"
-        f"  {'  âœ" Optimal (>90%)' if costates.bang_bang_pct > 90 else '  ~ Acceptable (>70%)' if costates.bang_bang_pct > 70 else '  âš  Review formulation'}\n\n"
+        f"{optimality_msg}\n\n"
         f"Control Structure:\n"
         f"  Deploy Regions:       {deploy_pct:.1f}%\n"
         f"  Recover Regions:      {recover_pct:.1f}%\n"
