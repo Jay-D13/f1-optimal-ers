@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Dict
+from dataclasses import dataclass, replace
+from typing import Dict, Mapping, Optional
 import numpy as np
 
 
@@ -9,6 +9,7 @@ class VehicleConfig:
     Based on FIA rules and TUMFTM F1_Shanghai.ini 
     configuration: https://github.com/TUMFTM/laptime-simulation/blob/master/laptimesim/input/vehicles/F1_Shanghai.ini
     """
+    regulation_year: int = 2025  # Default regulation year
     
     # ==================== Mass and Geometry ====================
     mass: float = 798.0           # [kg] Minimum with driver (2024 regs)
@@ -58,16 +59,6 @@ class VehicleConfig:
     def pow_max_total(self) -> float:
         """Total power (ICE + ERS) [W]"""
         return self.pow_max_ice + self.pow_max_ers
-    
-    @property
-    def max_ice_power(self) -> float:
-        """Alias for pow_max_ice for compatibility"""
-        return self.pow_max_ice
-    
-    @property
-    def max_total_power(self) -> float:
-        """Alias for pow_max_total for compatibility"""
-        return self.pow_max_total
     
     @property
     def cd(self) -> float:
@@ -173,6 +164,38 @@ class VehicleConfig:
     def for_shanghai(cls) -> 'VehicleConfig':
         # already have Shanghai defaults by default 
         return cls()
+    
+# ==================== Regulation-specific variants ====================
+
+_REGULATION_OVERRIDES: Mapping[str, Dict[str, float]] = {
+    # V6 Turbo Hybrid era (2014-2025)
+    "2025": {
+        "mass": 798.0,          # [kg] min with driver
+        "pow_max_ice": 575e3,   # [W] ~770 HP
+        "pow_max_ers": 120e3,   # [W] MGU-K power (120 kW)
+        "regulation_year": 2025,
+    },
+    # 2026 new regulations
+    "2026": {
+        "mass": 768.0,          # [kg] 30kg lighter
+        "pow_max_ice": 400e3,   # [W] ~536 HP (reduced ICE)
+        "pow_max_ers": 350e3,   # [W] MGU-K power (350 kW - tripled!)
+        "regulation_year": 2026,
+    },
+}
+
+def get_vehicle_config(regulation_set: str = "2025", *, base: Optional["VehicleConfig"] = None) -> "VehicleConfig":
+    """Return a VehicleConfig for a given regulation set.
+
+    This avoids duplicating all the shared parameters: we create a base VehicleConfig
+    (defaults to VehicleConfig()) and then override only the fields that change.
+    """
+    cfg = base or VehicleConfig()
+    try:
+        overrides = _REGULATION_OVERRIDES[regulation_set]
+    except KeyError as e:
+        raise ValueError(f"Unknown regulation set: {regulation_set}") from e
+    return replace(cfg, **overrides)
 
 
 # used for grip

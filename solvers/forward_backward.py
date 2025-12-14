@@ -190,9 +190,9 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         
         # === Power limit ===
         if self.use_ers_power:
-            P_max = veh.max_total_power  # ICE + ERS
+            P_max = veh.pow_max_total  # ICE + ERS
         else:
-            P_max = veh.max_ice_power    # ICE only
+            P_max = veh.pow_max_ice    # ICE only
         
         F_power = P_max / max(v, 5.0)
         

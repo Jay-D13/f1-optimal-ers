@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from solvers import (
     ForwardBackwardSolver,
     SpatialNLPSolver,
-    OptimalTrajectory,
+    OptimalTrajectory
 )
 from models import F1TrackModel, VehicleDynamicsModel
-from config import ERSConfig, VehicleConfig
+from config import ERSConfig, VehicleConfig, get_vehicle_config, get_ers_config
 from utils import RunManager, export_results
 from visualization import (
     visualize_track,
@@ -37,7 +37,7 @@ def main(args):
     print("CONFIGURATION")
     print("="*70)
     
-    ers_config = ERSConfig()
+    ers_config = get_ers_config(args.regulations)
     
     # Vehicle config (track-specific)
     track_configs = {
@@ -52,6 +52,7 @@ def main(args):
         args.track.lower(), 
         lambda: VehicleConfig()
     )()
+    vehicle_config = get_vehicle_config(args.regulations, base=vehicle_config)
     
     print(f"\nTrack: {args.track}")
     print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
@@ -141,12 +142,13 @@ def main(args):
         {'='*70}
         F1 ERS OPTIMIZATION RESULTS - {args.track.upper()}
         {'='*70}
+        Regulations Year:      {args.regulations}
 
         TRACK INFORMATION:
-        Track:              {args.track}
-        Year:               {args.year}
-        Total Length:       {track.total_length:.0f} m
-        Number of Segments: {len(track.segments)}
+        Track:                 {args.track}
+        Year of track data:    {args.year}
+        Total Length:          {track.total_length:.0f} m
+        Number of Segments:    {len(track.segments)}
 
         LAP TIME PERFORMANCE:
         Lap Time (No ERS):      {velocity_profile_no_ers.lap_time:.3f} s
@@ -296,6 +298,9 @@ if __name__ == "__main__":
             python main.py --track Monaco --plot
             python main.py --track Monza --initial-soc 0.6 --plot --save-animation
             python main.py --track Spa --year 2023 --driver VER --plot
+            
+            python main.py --track Monaco --solver nlp --plot --save-animation
+            TODO: for the presentation -> different start and end SOCs
         """
     )
     
@@ -318,6 +323,9 @@ if __name__ == "__main__":
     parser.add_argument('--solver', type=str, default='nlp',
                         choices=['nlp', 'ecms', 'pmp', 'mpcc'],
                         help='Solver to use (nlp is fully implemented)')
+    parser.add_argument('--regulations', type=str, default='2025',
+                        choices=['2025', '2026'],
+                        help='Choose "2025" for the V6 Turbo Hybrid era rules (2014-2025) or "2026" for new upcoming engine specs')
     
     args = parser.parse_args()
     

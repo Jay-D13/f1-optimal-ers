@@ -144,18 +144,40 @@ class SpatialNLPSolver(BaseSolver):
             v_k = V[k]
             soc_k = SOC[k]
             
+            if self.ers.regulation_year >= 2026:
+                # --- 2026 RULES: Speed-Dependent Tapering ---
+                v_kph = v_k * 3.6
+                
+                # Base Limit (350 kW)
+                p_base = self.ers.max_deployment_power
+                
+                # Linear Taper (290-340 kph): 1800 - 5*v
+                p_taper1 = (1800.0 - 5.0 * v_kph) * 1000.0
+                
+                # Sharp Taper (340-345 kph): 6900 - 20*v
+                p_taper2 = (6900.0 - 20.0 * v_kph) * 1000.0
+                
+                P_deploy_max_k = ca.fmax(0, ca.fmin(p_base, ca.fmin(p_taper1, p_taper2)))
+                
+            else:
+                # --- 2025 RULES: Constant Power Limit ---
+                P_deploy_max_k = self.ers.max_deployment_power
+            
             # Current control  
             P_ers_k = P_ERS[k]
+            opti.subject_to(opti.bounded(-self.ers.max_recovery_power, P_ers_k, P_deploy_max_k))
+            
             throttle_k = THROTTLE[k]
             brake_k = BRAKE[k]
             
             # --- Velocity dynamics ---
             # dv/ds = (1/v) * (F_net / m)
+            v_safe = ca.fmax(v_k, 5.0)
             
             # Aerodynamic forces
             q = 0.5 * veh.rho_air * v_k**2
-            F_drag = q * veh.cd * veh.frontal_area
-            F_downforce = q * veh.cl * veh.frontal_area
+            F_drag = q * veh.c_w_a
+            F_downforce = q * (veh.c_z_a_f + veh.c_z_a_r)
             
             # Normal force and friction
             F_normal = veh.mass * veh.g * ca.cos(gradient_k) + F_downforce
@@ -163,25 +185,28 @@ class SpatialNLPSolver(BaseSolver):
             F_gravity = veh.mass * veh.g * ca.sin(gradient_k)
             
             # Propulsion: ICE + ERS deployment
-            P_ice = throttle_k * veh.max_ice_power
-            P_ers_deploy = ca.fmax(P_ers_k, 0)
-            P_total = P_ice + P_ers_deploy
+            P_ice = throttle_k * veh.pow_max_ice
+            F_ice = P_ice / v_safe
+            F_ers = P_ers_k / v_safe
             
-            v_safe = ca.fmax(v_k, 5.0)
-            F_prop = P_total / v_safe
+            F_brake_mech = -brake_k * veh.max_brake_force
+            F_long = F_ice + F_ers + F_brake_mech
+            F_grip_max = veh.mu_longitudinal * F_normal
             
             # Grip limit on propulsion
             F_grip_max = veh.mu_longitudinal * F_normal
-            F_prop = ca.fmin(F_prop, F_grip_max)
+            # F_prop = ca.fmin(F_prop, F_grip_max)
+            
+            opti.subject_to(ca.fabs(F_long) <= F_grip_max)
             
             # Braking: mechanical + ERS harvest
-            F_brake_mech = brake_k * veh.max_brake_force
-            P_ers_harvest = ca.fmin(P_ers_k, 0)  # Negative
-            F_brake_regen = -P_ers_harvest / v_safe
-            F_brake_total = ca.fmin(F_brake_mech + F_brake_regen, F_grip_max)
+            # F_brake_mech = brake_k * veh.max_brake_force
+            # P_ers_harvest = ca.fmin(P_ers_k, 0)  # Negative
+            # F_brake_regen = -P_ers_harvest / v_safe
+            # F_brake_total = ca.fmin(F_brake_mech + F_brake_regen, F_grip_max)
             
             # Net force and acceleration
-            F_net = F_prop - F_drag - F_roll - F_gravity - F_brake_total
+            F_net = F_long - F_drag - F_roll - F_gravity
             dv_dt = F_net / veh.mass
             
             # Convert to spatial: dv/ds = dv/dt * dt/ds = dv/dt / v
@@ -213,7 +238,7 @@ class SpatialNLPSolver(BaseSolver):
         for k in range(self.N + 1):
             # Velocity bounds
             opti.subject_to(V[k] >= cons['v_min'])
-            opti.subject_to(V[k] <= v_limit_profile[k] * 1.005)  # Small margin
+            opti.subject_to(V[k] <= v_limit_profile[k] * 1.01)  # IMPORTANT small margin
             
             # SOC bounds (hard - battery safety)
             opti.subject_to(SOC[k] >= cons['soc_min'])
@@ -225,8 +250,8 @@ class SpatialNLPSolver(BaseSolver):
         
         for k in range(self.N):
             # ERS power limits
-            opti.subject_to(P_ERS[k] >= cons['P_ers_min'])
-            opti.subject_to(P_ERS[k] <= cons['P_ers_max'])
+            # opti.subject_to(P_ERS[k] >= cons['P_ers_min'])
+            # opti.subject_to(P_ERS[k] <= cons['P_ers_max'])
             
             # Throttle/brake limits
             opti.subject_to(THROTTLE[k] >= 0)
@@ -264,6 +289,20 @@ class SpatialNLPSolver(BaseSolver):
             total_deployment += deployment_k
         
         opti.subject_to(total_deployment <= energy_limit)
+        
+        # =====================================================
+        # ENERGY RECOVERY LIMIT CONSTRAINT
+        # =====================================================
+        
+        total_recovery = 0
+        for k in range(self.N):
+            v_avg = ca.fmax(0.5 * (V[k] + V[k+1]), 5.0)
+            dt_segment = self.ds / v_avg
+            # Recovery is when P_ERS < 0, so we take max(-P_ERS, 0)
+            recovery_k = ca.fmax(-P_ERS[k], 0) * dt_segment
+            total_recovery += recovery_k
+        
+        opti.subject_to(total_recovery <= ers.recovery_limit_per_lap)
         
         # =====================================================
         # SOLVER CONFIGURATION

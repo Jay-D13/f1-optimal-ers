@@ -205,13 +205,62 @@ class VehicleDynamicsModel:
         veh = self.vehicle
         ers = self.ers
         
-        # === Physical Constants ===
-        # g = veh.g
-        # rho = veh.rho_air
-        # A = veh.frontal_area
-        # m = veh.mass
+        # =====================================================================
+        # REGULATION-SPECIFIC ERS LIMITS
+        # =====================================================================
         
-        # === Aerodynamic Forces ===
+        # MGU-K peak power
+        P_k_max_config = ers.max_k_deployment_power
+        
+        if ers.regulation_year >= 2026:
+            # --- 2026 REGULATIONS (Variable Power Limit) ---
+            # Power tapers off at high speed to prevent "infinite" energy deployment
+            
+            # Convert v to km/h for the formula
+            v_kph = v * 3.6
+            
+            # 1. Base limit (350 kW or whatever is in config)
+            p_limit_base = P_k_max_config
+            
+            # 2. Linear drop 290-340 kph: P(kW) = 1800 - 5*v
+            #    (1800 - 5*290 = 350kW)  -> (1800 - 5*340 = 100kW)
+            p_limit_taper1 = (1800.0 - 5.0 * v_kph) * 1000.0
+            
+            # 3. Sharp drop 340-345 kph: P(kW) = 6900 - 20*v
+            #    (6900 - 20*340 = 100kW) -> (6900 - 20*345 = 0kW)
+            p_limit_taper2 = (6900.0 - 20.0 * v_kph) * 1000.0
+            
+            # Apply the continuous min() of all curves
+            # We clip at 0 to ensure this "ceiling" doesn't become negative
+            P_ers_deploy_limit = ca.fmax(0, ca.fmin(p_limit_base, ca.fmin(p_limit_taper1, p_limit_taper2)))
+            
+        else:
+            # --- 2025 REGULATIONS (Constant Power Limit) ---
+            # The MGU-K can provide max power at any speed (RPM limits handled elsewhere/ignored simplified)
+            P_ers_deploy_limit = P_k_max_config
+
+        # Apply the Calculated Limit to the Control Input
+        # P_ers > 0 is deployment. We enforce: P_ers <= P_ers_deploy_limit
+        # (Recovery limits are usually constant 120kW/350kW, handled below)
+        
+        P_ers_deploy_cmd = ca.fmax(P_ers, 0)
+        P_ers_deploy_limited = ca.fmin(P_ers_deploy_cmd, P_ers_deploy_limit)
+        
+        P_ers_harvest_cmd = ca.fmin(P_ers, 0)
+        
+        # Check recovery limit (usually symmetric or specified)
+        P_k_rec_max = ers.max_k_recovery_power 
+        # P_ers_harvest_cmd is negative, so we limit it to be >= -P_k_rec_max
+        P_ers_harvest_limited = ca.fmax(P_ers_harvest_cmd, -P_k_rec_max)
+        
+        # Recombine for the actual power applied to the wheels
+        P_ers_actual = P_ers_deploy_limited + P_ers_harvest_limited
+
+        # =====================================================================
+        # PHYSICS MODEL
+        # =====================================================================
+        
+        # Aerodynamic Forces
         q = 0.5 * veh.rho_air * v**2
         F_drag = q * veh.c_w_a
         F_downforce = q * (veh.c_z_a_f + veh.c_z_a_r)
@@ -231,7 +280,6 @@ class VehicleDynamicsModel:
         F_lat = veh.mass * a_lat
 
         # Grip available for longitudinal (simplified friction circle)
-        # Using average friction coefficient
         mu_avg = 0.5 * (self.tires.mux_f + self.tires.mux_r)
         F_grip_total = mu_avg * F_normal
         
@@ -239,19 +287,19 @@ class VehicleDynamicsModel:
         F_grip_long_sq = F_grip_total**2 - F_lat**2
         F_grip_long = ca.sqrt(ca.fmax(F_grip_long_sq, 100.0))
         
-        # Propulsion
+        # Propulsion (ICE + ERS)
+        # Note: ICE power also changes by year, but that's handled by veh.pow_max_ice value
         P_ice = throttle * veh.pow_max_ice
-        P_ers_deploy = ca.fmax(P_ers, 0)
-        P_total = P_ice + P_ers_deploy
+        P_total = P_ice + ca.fmax(P_ers_actual, 0) # Only positive ERS adds to propulsion
         
         v_safe = ca.fmax(v, 5.0)
         F_prop_request = P_total / v_safe
         F_prop = ca.fmin(F_prop_request, F_grip_long)
         
-        # Braking
+        # Braking (mechanical + regen)
         F_brake_mech = brake * veh.max_brake_force
-        P_ers_harvest = ca.fmin(P_ers, 0)
-        F_brake_regen = -P_ers_harvest / v_safe
+        # Regen force comes from the negative part of P_ers_actual
+        F_brake_regen = -ca.fmin(P_ers_actual, 0) / v_safe
         F_brake_total = ca.fmin(F_brake_mech + F_brake_regen, F_grip_long)
         
         # Equations of motion
@@ -260,11 +308,17 @@ class VehicleDynamicsModel:
         F_net = F_prop - F_drag - F_roll - F_gravity - F_brake_total
         dv_dt = F_net / veh.mass
         
-        # Battery dynamics with smooth efficiency transition
-        sigma = 0.5 * (1 + ca.tanh(P_ers / 1000.0))
+        # =====================================================================
+        # BATTERY DYNAMICS (SoC)
+        # =====================================================================
+        
+        # Smooth efficiency transition between deployment and harvest
+        sigma = 0.5 * (1 + ca.tanh(P_ers_actual / 1000.0))
         eta_d = ers.deployment_efficiency
         eta_r = ers.recovery_efficiency
-        P_battery = sigma * (P_ers / eta_d) + (1 - sigma) * (P_ers * eta_r)
+        
+        # Power leaving/entering the battery (internal)
+        P_battery = sigma * (P_ers_actual / eta_d) + (1 - sigma) * (P_ers_actual * eta_r)
         
         dsoc_dt = -P_battery / ers.battery_capacity
         
@@ -359,7 +413,7 @@ class VehicleDynamicsModel:
             
             # Velocity limits
             'v_min': 15.0,   # m/s (~54 km/h)
-            'v_max': 100.0,  # m/s (~360 km/h)
+            'v_max': 105.0,  # m/s (~360 km/h)
             
             # Control limits
             'throttle_min': 0.0,
