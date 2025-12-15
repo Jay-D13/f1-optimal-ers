@@ -1,8 +1,9 @@
 """
 Spatial-Domain NLP Solver for ERS Optimization
-Offline optimizer using direct collocation in spatial domain
 
-Problem formulation:
+Offline optimizer using direct collocation in spatial domain.
+
+Problem Formulation:
     minimize    T = ∑(ds / v[k])              (lap time)
     subject to: 
         v[k] ≤ v_limit[k]                     (grip limit from Forward-Backward)
@@ -12,359 +13,323 @@ Problem formulation:
         SOC_min ≤ SOC ≤ SOC_max               (battery limits)
 """
 
-import numpy as np
-import casadi as ca
 import time
+
+import casadi as ca
+import numpy as np
 
 from solvers import BaseSolver, OptimalTrajectory
 
 
 class SpatialNLPSolver(BaseSolver):
     """
-    Finds the globally (offline) optimal ERS deployment strategy for a single lap
+    Finds the globally (offline) optimal ERS deployment strategy for a single lap.
+    Optimizes lap time subject to energy budget and thermal/grip limits.
     """
-    
+
     def __init__(self, vehicle_model, track_model, ers_config, ds: float = 5.0):
         super().__init__(vehicle_model, track_model, ers_config)
         self.ds = ds
-        
+
         # Discretization
         self.N = int(track_model.total_length / ds)
         self.s_grid = np.linspace(0, track_model.total_length, self.N + 1)
-        
-        # CasADi problem storage
-        self.opti = None
-        self.solution = None
-        
+
     @property
     def name(self) -> str:
         return "SpatialNLP"
-    
-    def solve(self,
-              v_limit_profile: np.ndarray,
-              initial_soc: float = 0.5,
-              final_soc_min: float = 0.3,
-              energy_limit: float = 4e6) -> OptimalTrajectory:
+
+    def solve(
+        self,
+        v_limit_profile: np.ndarray,
+        initial_soc: float = 0.5,
+        final_soc_min: float = 0.3,
+        is_flying_lap: bool = True
+    ) -> OptimalTrajectory:
         """
-        velocity is essentially FIXED by grip limits
-        We're really just optimizing WHEN to deploy ERS for small speed gains
+        Solve the optimal control problem for ERS deployment.
+
+        Args:
+            v_limit_profile: Maximum velocity profile from grip limits
+            initial_soc: Starting state of charge (0-1)
+            final_soc_min: Minimum final state of charge
+
+        Returns:
+            OptimalTrajectory containing solution
         """
-        
         self._log(f"Setting up NLP with {self.N} nodes...")
-        
         start_time = time.time()
-        
+
         # Ensure v_limit is the right size
         if len(v_limit_profile) != self.N + 1:
             v_limit_profile = np.interp(
-                self.s_grid, 
+                self.s_grid,
                 np.linspace(0, self.track.total_length, len(v_limit_profile)),
-                v_limit_profile
+                v_limit_profile,
             )
-        
+
         # Build and solve NLP
-        trajectory = self._build_and_solve(
-            v_limit_profile=v_limit_profile,
-            initial_soc=initial_soc,
-            final_soc_min=final_soc_min,
-            energy_limit=energy_limit
-        )
-        
-        trajectory.solve_time = time.time() - start_time
-        
-        self._log(f"✓ Solved in {trajectory.solve_time:.2f}s")
-        self._log(f"  Lap time: {trajectory.lap_time:.3f}s")
-        self._log(f"  Status: {trajectory.solver_status}")
-        
-        return trajectory
-    
-    def _build_and_solve(self,
-                         v_limit_profile: np.ndarray,
-                         initial_soc: float,
-                         final_soc_min: float,
-                         energy_limit: float) -> OptimalTrajectory:
-        
+        try:
+            trajectory = self._build_and_solve(
+                v_limit_profile=v_limit_profile,
+                initial_soc=initial_soc,
+                final_soc_min=final_soc_min,
+                is_flying_lap=is_flying_lap
+            )
+            trajectory.solve_time = time.time() - start_time
+
+            self._log(f"✓ Solved in {trajectory.solve_time:.2f}s")
+            self._log(f"  Lap time: {trajectory.lap_time:.3f}s")
+            self._log(f"  Status: {trajectory.solver_status}")
+            return trajectory
+
+        except RuntimeError as e:
+            self._log(f"❌ Optimization failed: {e}")
+            raise
+
+    def _build_and_solve(
+        self,
+        v_limit_profile: np.ndarray,
+        initial_soc: float,
+        final_soc_min: float,
+        is_flying_lap: bool
+    ) -> OptimalTrajectory:
+        """Build and solve the CasADi optimization problem."""
         opti = ca.Opti()
-        
-        # Get constraints from vehicle model
-        cons = self.vehicle.get_constraints()
-        
-        # Get track data
-        track_data = self.track.track_data
-        gradient_arr = track_data.gradient
-        radius_arr = track_data.radius
-        
-        # Ensure arrays are right size
-        if len(gradient_arr) < self.N:
-            gradient_arr = np.resize(gradient_arr, self.N)
-        if len(radius_arr) < self.N:
-            radius_arr = np.resize(radius_arr, self.N)
-        
-        # =====================================================
-        # DECISION VARIABLES
-        # =====================================================
-        
-        # States at each node
-        V = opti.variable(self.N + 1)       # Velocity (m/s)
-        SOC = opti.variable(self.N + 1)     # State of charge (0-1)
-        
-        # Controls between nodes
-        P_ERS = opti.variable(self.N)       # ERS power (W), + = deploy
-        THROTTLE = opti.variable(self.N)    # Throttle (0-1)
-        BRAKE = opti.variable(self.N)       # Brake (0-1)
-        
-        # =====================================================
-        # OBJECTIVE: Minimize lap time
-        # =====================================================
-        
-        lap_time = 0
-        for k in range(self.N):
-            v_avg = 0.5 * (V[k] + V[k+1])
-            v_safe = ca.fmax(v_avg, 5.0)
-            lap_time += self.ds / v_safe
-        
-        opti.minimize(lap_time)
-        
-        # =====================================================
-        # DYNAMICS CONSTRAINTS
-        # =====================================================
-        
+
         # Get vehicle parameters
         veh = self.vehicle.vehicle
         ers = self.vehicle.ers
-        
+
+        # Track data arrays
+        track_data = self.track.track_data
+        gradient_arr = np.resize(track_data.gradient, self.N)
+
+        # =================================================================
+        # DECISION VARIABLES
+        # =================================================================
+
+        # States
+        V = opti.variable(self.N + 1)  # Velocity (m/s)
+        SOC = opti.variable(self.N + 1)  # State of Charge (0-1)
+
+        # Controls (split to avoid max() in constraints)
+        P_DEPLOY = opti.variable(self.N)  # ERS discharge power (≥0)
+        P_HARVEST = opti.variable(self.N)  # ERS recovery power (≥0)
+        THROTTLE = opti.variable(self.N)  # Throttle position (0-1)
+        BRAKE = opti.variable(self.N)  # Brake position (0-1)
+
+        # =================================================================
+        # OBJECTIVE: Minimize Lap Time
+        # =================================================================
+
+        T_lap = 0
         for k in range(self.N):
-            # Track parameters for this segment
-            gradient_k = float(gradient_arr[min(k, len(gradient_arr)-1)])
-            radius_k = float(radius_arr[min(k, len(radius_arr)-1)])
-            radius_k = max(radius_k, 15.0)
-            gradient_k = np.clip(gradient_k, -0.15, 0.15)
-            
-            # Current state
-            v_k = V[k]
-            soc_k = SOC[k]
-            
-            if self.ers.regulation_year >= 2026:
-                # --- 2026 RULES: Speed-Dependent Tapering ---
-                v_kph = v_k * 3.6
-                
-                # Base Limit (350 kW)
-                p_base = self.ers.max_deployment_power
-                
-                # Linear Taper (290-340 kph): 1800 - 5*v
-                p_taper1 = (1800.0 - 5.0 * v_kph) * 1000.0
-                
-                # Sharp Taper (340-345 kph): 6900 - 20*v
-                p_taper2 = (6900.0 - 20.0 * v_kph) * 1000.0
-                
-                P_deploy_max_k = ca.fmax(0, ca.fmin(p_base, ca.fmin(p_taper1, p_taper2)))
-                
-            else:
-                # --- 2025 RULES: Constant Power Limit ---
-                P_deploy_max_k = self.ers.max_deployment_power
-            
-            # Current control  
-            P_ers_k = P_ERS[k]
-            opti.subject_to(opti.bounded(-self.ers.max_recovery_power, P_ers_k, P_deploy_max_k))
-            
-            throttle_k = THROTTLE[k]
-            brake_k = BRAKE[k]
-            
-            # --- Velocity dynamics ---
-            # dv/ds = (1/v) * (F_net / m)
-            v_safe = ca.fmax(v_k, 5.0)
-            
-            # Aerodynamic forces
-            q = 0.5 * veh.rho_air * v_k**2
-            F_drag = q * veh.c_w_a
-            F_downforce = q * (veh.c_z_a_f + veh.c_z_a_r)
-            
-            # Normal force and friction
-            F_normal = veh.mass * veh.g * ca.cos(gradient_k) + F_downforce
-            F_roll = veh.cr * F_normal
-            F_gravity = veh.mass * veh.g * ca.sin(gradient_k)
-            
-            # Propulsion: ICE + ERS deployment
-            P_ice = throttle_k * veh.pow_max_ice
-            F_ice = P_ice / v_safe
-            F_ers = P_ers_k / v_safe
-            
-            F_brake_mech = -brake_k * veh.max_brake_force
-            F_long = F_ice + F_ers + F_brake_mech
-            F_grip_max = veh.mu_longitudinal * F_normal
-            
-            # Grip limit on propulsion
-            F_grip_max = veh.mu_longitudinal * F_normal
-            # F_prop = ca.fmin(F_prop, F_grip_max)
-            
-            opti.subject_to(ca.fabs(F_long) <= F_grip_max)
-            
-            # Braking: mechanical + ERS harvest
-            # F_brake_mech = brake_k * veh.max_brake_force
-            # P_ers_harvest = ca.fmin(P_ers_k, 0)  # Negative
-            # F_brake_regen = -P_ers_harvest / v_safe
-            # F_brake_total = ca.fmin(F_brake_mech + F_brake_regen, F_grip_max)
-            
-            # Net force and acceleration
-            F_net = F_long - F_drag - F_roll - F_gravity
-            dv_dt = F_net / veh.mass
-            
-            # Convert to spatial: dv/ds = dv/dt * dt/ds = dv/dt / v
-            dv_ds = dv_dt / v_safe
-            
-            # Euler integration
-            opti.subject_to(V[k+1] == V[k] + dv_ds * self.ds)
-            
-            # --- SOC dynamics ---
-            # P_ers > 0: deploy -> SOC decreases
-            # P_ers < 0: harvest -> SOC increases
-            
-            # Smooth efficiency transition
-            sigma = 0.5 * (1 + ca.tanh(P_ers_k / 1000.0))
-            eta_d = ers.deployment_efficiency
-            eta_r = ers.recovery_efficiency
-            
-            P_battery = sigma * (P_ers_k / eta_d) + (1 - sigma) * (P_ers_k * eta_r)
-            
-            # dsoc/ds = (dsoc/dt) / v = (-P_battery / E_cap) / v
-            dsoc_ds = -P_battery / (ers.battery_capacity * v_safe)
-            
-            opti.subject_to(SOC[k+1] == SOC[k] + dsoc_ds * self.ds)
-        
-        # =====================================================
-        # STATE CONSTRAINTS
-        # =====================================================
-        
-        for k in range(self.N + 1):
-            # Velocity bounds
-            opti.subject_to(V[k] >= cons['v_min'])
-            opti.subject_to(V[k] <= v_limit_profile[k] * 1.01)  # IMPORTANT small margin
-            
-            # SOC bounds (hard - battery safety)
-            opti.subject_to(SOC[k] >= cons['soc_min'])
-            opti.subject_to(SOC[k] <= cons['soc_max'])
-        
-        # =====================================================
-        # CONTROL CONSTRAINTS
-        # =====================================================
-        
-        for k in range(self.N):
-            # ERS power limits
-            # opti.subject_to(P_ERS[k] >= cons['P_ers_min'])
-            # opti.subject_to(P_ERS[k] <= cons['P_ers_max'])
-            
-            # Throttle/brake limits
-            opti.subject_to(THROTTLE[k] >= 0)
-            opti.subject_to(THROTTLE[k] <= 1)
-            opti.subject_to(BRAKE[k] >= 0)
-            opti.subject_to(BRAKE[k] <= 1)
-            
-            # No simultaneous throttle and heavy brake
-            opti.subject_to(THROTTLE[k] * BRAKE[k] <= 0.1)
-        
-        # =====================================================
-        # BOUNDARY CONDITIONS
-        # =====================================================
-        
-        # Initial SOC
-        opti.subject_to(SOC[0] == initial_soc)
-        
-        # Final SOC constraint
-        opti.subject_to(SOC[self.N] >= final_soc_min)
-        
-        # Initial velocity (reasonable start)
-        v_start = min(50.0, v_limit_profile[0])
-        opti.subject_to(V[0] >= v_start * 0.9)
-        opti.subject_to(V[0] <= v_start * 1.1)
-        
-        # =====================================================
-        # ENERGY LIMIT CONSTRAINT
-        # =====================================================
-        
+            # Trapezoidal integration for time
+            v_avg = 0.5 * (V[k] + V[k + 1])
+            v_safe = ca.fmax(v_avg, 1.0)  # Avoid singularity
+            T_lap += self.ds / v_safe
+
+        opti.minimize(T_lap)
+
+        # =================================================================
+        # DYNAMICS & PHYSICS
+        # =================================================================
+
         total_deployment = 0
-        for k in range(self.N):
-            v_avg = ca.fmax(0.5 * (V[k] + V[k+1]), 5.0)
-            dt_segment = self.ds / v_avg
-            deployment_k = ca.fmax(P_ERS[k], 0) * dt_segment
-            total_deployment += deployment_k
-        
-        opti.subject_to(total_deployment <= energy_limit)
-        
-        # =====================================================
-        # ENERGY RECOVERY LIMIT CONSTRAINT
-        # =====================================================
-        
         total_recovery = 0
+
         for k in range(self.N):
-            v_avg = ca.fmax(0.5 * (V[k] + V[k+1]), 5.0)
-            dt_segment = self.ds / v_avg
-            # Recovery is when P_ERS < 0, so we take max(-P_ERS, 0)
-            recovery_k = ca.fmax(-P_ERS[k], 0) * dt_segment
-            total_recovery += recovery_k
-        
+            # --- Environment ---
+            grad = np.clip(gradient_arr[k], -0.2, 0.2)
+
+            # --- Vehicle State ---
+            v_k = V[k]
+            v_safe = ca.fmax(v_k, 5.0)
+
+            # --- 2026 Regulation Logic (Speed Dependent Taper) ---
+            self._apply_ers_power_limits(opti, P_DEPLOY[k], v_k, ers)
+
+            # Harvest and non-negativity limits
+            opti.subject_to(P_HARVEST[k] <= ers.max_recovery_power)
+            opti.subject_to(P_DEPLOY[k] >= 0)
+            opti.subject_to(P_HARVEST[k] >= 0)
+
+            # --- Forces ---
+            # Drag (with 2026 active aero adjustment)
+            c_w_a_eff = self._get_effective_drag_coefficient(veh, ers)
+            F_drag = 0.5 * veh.rho_air * v_k**2 * c_w_a_eff
+
+            # Resistances
+            F_roll = veh.mass * veh.g * veh.cr
+            F_grav = veh.mass * veh.g * ca.sin(grad)
+
+            # Propulsion
+            P_net_ers = P_DEPLOY[k] - P_HARVEST[k]
+            P_ice = THROTTLE[k] * veh.pow_max_ice
+            F_prop = (P_ice + P_net_ers) / v_safe
+
+            # Braking
+            F_brake = BRAKE[k] * veh.max_brake_force
+
+            # Net Force
+            F_net = F_prop - F_brake - F_drag - F_roll - F_grav
+
+            # --- Grip Limits (Friction Circle) ---
+            F_norm = veh.mass * veh.g * ca.cos(grad) + 0.5 * veh.rho_air * v_k**2 * (
+                veh.c_z_a_f + veh.c_z_a_r
+            )
+            F_grip = veh.mu_longitudinal * F_norm
+
+            opti.subject_to(F_prop - F_brake <= F_grip)
+            opti.subject_to(F_prop - F_brake >= -F_grip)
+
+            # --- Dynamics Integration (Euler) ---
+            dv_ds = F_net / (veh.mass * v_safe)
+            opti.subject_to(V[k + 1] == V[k] + dv_ds * self.ds)
+
+            # --- Battery Dynamics ---
+            P_bat_out = (P_DEPLOY[k] / ers.deployment_efficiency) - (
+                P_HARVEST[k] * ers.recovery_efficiency
+            )
+            dsoc_ds = -P_bat_out / (ers.battery_capacity * v_safe)
+            opti.subject_to(SOC[k + 1] == SOC[k] + dsoc_ds * self.ds)
+
+            # --- Energy Accumulation ---
+            dt_step = self.ds / v_safe
+            total_deployment += P_DEPLOY[k] * dt_step
+            total_recovery += P_HARVEST[k] * dt_step
+
+            # Control interlock (prevent simultaneous throttle + brake)
+            opti.subject_to(THROTTLE[k] * BRAKE[k] <= 0.01)
+
+        # =================================================================
+        # CONSTRAINTS
+        # =================================================================
+
+        # Boundary conditions
+        opti.subject_to(SOC[0] == initial_soc)
+        opti.subject_to(SOC[-1] >= final_soc_min)
+        # opti.subject_to(V[0] == v_limit_profile[0])
+
+        # Global limits
+        opti.subject_to(total_deployment <= ers.deployment_limit_per_lap)
         opti.subject_to(total_recovery <= ers.recovery_limit_per_lap)
+
+        # State bounds
+        opti.subject_to(opti.bounded(ers.min_soc, SOC, ers.max_soc))
+        opti.subject_to(opti.bounded(5.0, V, v_limit_profile * 1.02))
+
+        # Control bounds
+        opti.subject_to(opti.bounded(0, THROTTLE, 1))
+        opti.subject_to(opti.bounded(0, BRAKE, 1))
         
-        # =====================================================
-        # SOLVER CONFIGURATION
-        # =====================================================
-        
-        opts = {
-            'ipopt.max_iter': 10000,
-            'ipopt.print_level': 3,
-            'print_time': 1,
-            'ipopt.tol': 1e-5,
-            'ipopt.acceptable_tol': 1e-4,
-            'ipopt.acceptable_iter': 10,
-            'ipopt.linear_solver': 'ma97',  # use 'mumps' if no license
-            'ipopt.warm_start_init_point': 'yes',
-            'ipopt.mu_strategy': 'adaptive',
-            'ipopt.nlp_scaling_method': 'gradient-based',
-        }
-        
-        opti.solver('ipopt', opts)
-        
-        # =====================================================
-        # INITIAL GUESS
-        # =====================================================
-        
-        self._set_initial_guess(opti, V, SOC, P_ERS, THROTTLE, BRAKE,
-                                v_limit_profile, initial_soc)
-        
-        # =====================================================
-        # SOLVE
-        # =====================================================
-        
+        if is_flying_lap:
+            opti.subject_to(V[0] == V[-1])
+        else:
+            opti.subject_to(V[0] == v_limit_profile[0])
+
+        # =================================================================
+        # 5. SOLVE
+        # =================================================================
+
+        self._configure_solver(opti)
+        self._set_initial_guess(opti, V, SOC, P_DEPLOY, THROTTLE, v_limit_profile, initial_soc)
+
         try:
             sol = opti.solve()
-            status = 'optimal'
-            
-            v_opt = sol.value(V)
-            soc_opt = sol.value(SOC)
-            P_ers_opt = sol.value(P_ERS)
-            throttle_opt = sol.value(THROTTLE)
-            brake_opt = sol.value(BRAKE)
-            
+            status = "optimal"
         except Exception as e:
-            self._log(f"⚠ Solver warning: {e}")
-            self._log("  Extracting best available solution...")
-            status = 'suboptimal'
-            
-            try:
-                v_opt = opti.debug.value(V)
-                soc_opt = opti.debug.value(SOC)
-                P_ers_opt = opti.debug.value(P_ERS)
-                throttle_opt = opti.debug.value(THROTTLE)
-                brake_opt = opti.debug.value(BRAKE)
-            except:
-                raise RuntimeError("Failed to extract any solution")
+            print(f"Solver Warning: {e}")
+            status = "suboptimal"
+            sol = opti.debug
+
+        # =================================================================
+        # 6. EXTRACT RESULTS
+        # =================================================================
+
+        return self._extract_trajectory(
+            sol, V, SOC, P_DEPLOY, P_HARVEST, THROTTLE, BRAKE, total_deployment, total_recovery, status
+        )
+
+    def _apply_ers_power_limits(self, opti, P_deploy_k, v_k, ers):
+        """Apply speed-dependent ERS power limits for 2026+ regulations."""
+        if ers.regulation_year >= 2026:
+            v_kph = v_k * 3.6
+            p_base = ers.max_deployment_power
+
+            # Taper logic: Linear drop 290-340kph, Sharp drop 340-345kph
+            p_taper1 = (1800.0 - 5.0 * v_kph) * 1000.0
+            p_taper2 = (6900.0 - 20.0 * v_kph) * 1000.0
+
+            limit_k = ca.fmax(0, ca.fmin(p_base, ca.fmin(p_taper1, p_taper2)))
+            opti.subject_to(P_deploy_k <= limit_k)
+        else:
+            opti.subject_to(P_deploy_k <= ers.max_deployment_power)
+
+    def _get_effective_drag_coefficient(self, veh, ers):
+        """
+        Calculate effective drag coefficient with 2026 active aero adjustment.
         
-        # =====================================================
-        # BUILD RESULT
-        # =====================================================
-        
-        t_opt, lap_time = self._compute_lap_time(self.s_grid, v_opt)
-        energy_deployed, energy_recovered = self._compute_energy_totals(P_ers_opt, v_opt)
-        
+        Simulates DRS/wing opening for 2026+ regulations with high drag vehicles.
+        """
+        c_w_a_eff = veh.c_w_a
+        if ers.regulation_year >= 2026 and c_w_a_eff > 1.0:
+            c_w_a_eff = c_w_a_eff * 0.65  # Simulate active aero reduction
+        return c_w_a_eff
+
+    def _configure_solver(self, opti):
+        """Configure IPOPT solver with appropriate options."""
+        opts = {
+            "ipopt.max_iter": 3000,
+            "ipopt.print_level": 4,
+            "ipopt.tol": 1e-4,
+            "ipopt.acceptable_tol": 1e-3,
+            "ipopt.linear_solver": "ma97",
+            "ipopt.nlp_scaling_method": "gradient-based",
+        }
+
+        try:
+            opti.solver("ipopt", opts)
+        except Exception:
+            print("⚠ MA97 not found, falling back to MUMPS")
+            opts["ipopt.linear_solver"] = "mumps"
+            opti.solver("ipopt", opts)
+
+    def _set_initial_guess(self, opti, V, SOC, P_DEPLOY, THROTTLE, v_limit_profile, initial_soc):
+        """Set initial guess for optimization variables."""
+        # Velocity: Follow limit closely
+        opti.set_initial(V, v_limit_profile * 0.95)
+
+        # SOC: Linear drain
+        soc_guess = np.linspace(initial_soc, 0.3, self.N + 1)
+        opti.set_initial(SOC, soc_guess)
+
+        # Controls
+        opti.set_initial(THROTTLE, np.ones(self.N) * 0.8)
+        opti.set_initial(P_DEPLOY, np.zeros(self.N))
+
+    def _extract_trajectory(
+        self, sol, V, SOC, P_DEPLOY, P_HARVEST, THROTTLE, BRAKE, total_deployment, total_recovery, status
+    ):
+        """Extract and package the optimization results."""
+        v_opt = sol.value(V)
+        soc_opt = sol.value(SOC)
+        p_deploy_opt = sol.value(P_DEPLOY)
+        p_harvest_opt = sol.value(P_HARVEST)
+
+        # Reconstruct net P_ERS for visualization
+        P_ers_opt = p_deploy_opt - p_harvest_opt
+
+        throttle_opt = sol.value(THROTTLE)
+        brake_opt = sol.value(BRAKE)
+
+        # Compute time array
+        t_opt = np.zeros_like(v_opt)
+        for i in range(1, len(t_opt)):
+            v_avg = 0.5 * (v_opt[i] + v_opt[i - 1])
+            t_opt[i] = t_opt[i - 1] + self.ds / max(v_avg, 1.0)
+
         return OptimalTrajectory(
             s=self.s_grid,
             ds=self.ds,
@@ -375,32 +340,10 @@ class SpatialNLPSolver(BaseSolver):
             throttle_opt=throttle_opt,
             brake_opt=brake_opt,
             t_opt=t_opt,
-            lap_time=lap_time,
-            energy_deployed=energy_deployed,
-            energy_recovered=energy_recovered,
-            solve_time=0.0,  # Set by caller
+            lap_time=t_opt[-1],
+            energy_deployed=sol.value(total_deployment),
+            energy_recovered=sol.value(total_recovery),
+            solve_time=0.0,
             solver_status=status,
             solver_name=self.name,
         )
-    
-    def _set_initial_guess(self, opti, V, SOC, P_ERS, THROTTLE, BRAKE,
-                           v_limit_profile, initial_soc):
-        """initial guess for faster convergence."""
-        
-        # Velocity: 90% of limit (conservative but fast)
-        v_init = 0.90 * v_limit_profile
-        v_init = np.clip(v_init, 20, 90)
-        opti.set_initial(V, v_init)
-        
-        # SOC: gradual depletion
-        soc_init = np.linspace(initial_soc, initial_soc - 0.15, self.N + 1)
-        soc_init = np.clip(soc_init, 0.25, 0.85)
-        opti.set_initial(SOC, soc_init)
-        
-        # Controls: moderate throttle, no ERS initially
-        opti.set_initial(P_ERS, np.zeros(self.N))
-        opti.set_initial(THROTTLE, 0.7 * np.ones(self.N))
-        opti.set_initial(BRAKE, np.zeros(self.N))
-        
-        self._log(f"Initial guess: v={v_init.min():.0f}-{v_init.max():.0f} m/s")
-

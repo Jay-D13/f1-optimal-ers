@@ -210,7 +210,7 @@ class VehicleDynamicsModel:
         # =====================================================================
         
         # MGU-K peak power
-        P_k_max_config = ers.max_k_deployment_power
+        P_k_max_config = ers.max_deployment_power
         
         if ers.regulation_year >= 2026:
             # --- 2026 REGULATIONS (Variable Power Limit) ---
@@ -249,7 +249,7 @@ class VehicleDynamicsModel:
         P_ers_harvest_cmd = ca.fmin(P_ers, 0)
         
         # Check recovery limit (usually symmetric or specified)
-        P_k_rec_max = ers.max_k_recovery_power 
+        P_k_rec_max = ers.max_recovery_power 
         # P_ers_harvest_cmd is negative, so we limit it to be >= -P_k_rec_max
         P_ers_harvest_limited = ca.fmax(P_ers_harvest_cmd, -P_k_rec_max)
         
@@ -413,7 +413,7 @@ class VehicleDynamicsModel:
             
             # Velocity limits
             'v_min': 15.0,   # m/s (~54 km/h)
-            'v_max': 105.0,  # m/s (~360 km/h)
+            'v_max': 110.0,  # m/s (~360 km/h)
             
             # Control limits
             'throttle_min': 0.0,

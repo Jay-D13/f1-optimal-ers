@@ -91,34 +91,66 @@ class VehicleConfig:
         }    
 
     
-    def get_max_cornering_speed(self, radius: float) -> float:
+    def get_max_cornering_speed(self, radius: float, tire_params: Optional['TireParameters'] = None) -> float:
         """
-        Calculate maximum cornering speed for given radius.
+        Calculate maximum cornering speed.
         
-        Iterative solution accounting for downforce.
+        Uses CONSTANT friction coefficient (mu_lateral = 2.0) for consistency
+        across all solvers (FB and NLP). Downforce effect is calculated iteratively.
+        
+        Output is capped at V_MAX_PHYSICAL to prevent divergence.
         """
-        mu = self.mu_lateral
-            
-        if np.isinf(radius) or radius > 2000:
-            return 100.0  # Max on straights
+        # Use default parameters if none provided
+        tires = tire_params if tire_params is not None else TireParameters()
+
+        # Physical speed cap - F1 cars max out around 370 km/h = 103 m/s
+        # Use slightly higher for theoretical limit
+        V_MAX_PHYSICAL = 110.0  # m/s (~396 km/h)
+        
+        # For very large radii (essentially straights), return physical max
+        if np.isinf(radius) or radius > 1000:
+            return V_MAX_PHYSICAL
         
         radius = max(radius, 10.0)
         
-        # Start with no-downforce estimate
-        v = np.sqrt(mu * self.g * radius)
+        # Initial guess
+        v = 50.0 
         
-        # Iterate (downforce depends on speed)
-        for _ in range(5):
-            aero = self.get_aero_forces(v)
-            normal_force = self.mass * self.g + aero['downforce']
-            friction_force = mu * normal_force
-            v_new = np.sqrt(friction_force * radius / self.mass)
+        for _ in range(15):  # Iterative solver
+            # Cap v during iteration to prevent divergence
+            v = min(v, V_MAX_PHYSICAL)
             
-            if abs(v_new - v) < 0.1:
+            # 1. Calculate Downforce
+            aero = self.get_aero_forces(v)
+            downforce = aero['downforce']
+            
+            # 2. Total Vertical Load (Mass + Downforce)
+            # We ignore banking (gradient) here for the 'general' limit, 
+            # or you can assume flat ground (cos(0)=1).
+            F_z_total = self.mass * self.g + downforce
+            
+            # 3. Maximum lateral force (constant friction for consistency)
+            # Using constant mu_lateral = 2.0 for consistency across all solvers
+            mu_lat = self.mu_lateral  # 2.0
+            
+            # 4. Solve for new velocity
+            # F_lat = m * v^2 / R  <=  mu * F_z_total
+            # v = sqrt( mu * F_z_total * R / m )
+            
+            F_lat_max = mu_lat * F_z_total
+            v_new = np.sqrt(F_lat_max * radius / self.mass)
+            
+            # Cap to physical max
+            v_new = min(v_new, V_MAX_PHYSICAL)
+            
+            # Damped update for stability
+            if abs(v_new - v) < 0.01:
+                v = v_new
                 break
-            v = 0.7 * v + 0.3 * v_new
+            v = 0.6 * v + 0.4 * v_new
         
-        return min(v, 100.0)  # Cap at max speed
+        # Final safety cap
+        return min(v, V_MAX_PHYSICAL)
     
     # ==================== Track-Specific Configurations ====================
     

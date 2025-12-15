@@ -99,15 +99,16 @@ def main(args):
     print("PHASE 1 - VELOCITY PROFILE (Forward-Backward)")
     print("="*70)
     
-    # Profile WITHOUT ERS (ICE power only)
-    print("\n   Computing theoretical profile WITHOUT ERS...")
-    fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
-    velocity_profile_no_ers = fb_solver.solve()
+    # Enable Flying Lap!
+    USE_FLYING_LAP = True # TODO make argument
     
-    # Profile WITH ERS (ICE + ERS power)
-    print("\n   Computing theoretical profile WITH ERS...")
+    print(f"\n   Computing theoretical profile WITHOUT ERS (Flying: {USE_FLYING_LAP})...")
+    fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
+    velocity_profile_no_ers = fb_solver.solve(flying_lap=USE_FLYING_LAP)
+    
+    print(f"\n   Computing theoretical profile WITH ERS (Flying: {USE_FLYING_LAP})...")
     fb_solver.use_ers_power = True
-    velocity_profile_with_ers = fb_solver.solve()
+    velocity_profile_with_ers = fb_solver.solve(flying_lap=USE_FLYING_LAP)
     
     print(f"\n   Results:")
     print(f"     No ERS:   {velocity_profile_no_ers.lap_time:.3f}s "
@@ -125,10 +126,10 @@ def main(args):
     
     # Use the WITH-ERS velocity limit for optimization
     optimal_trajectory = nlp_solver.solve(
-        v_limit_profile=velocity_profile_with_ers.v,#v_max,
+        v_limit_profile=velocity_profile_with_ers.v,
         initial_soc=args.initial_soc,
         final_soc_min=args.final_soc_min,
-        energy_limit=ers_config.deployment_limit_per_lap,
+        is_flying_lap=USE_FLYING_LAP
     )
     
     # =========================================================================
