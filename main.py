@@ -127,6 +127,7 @@ def main(args):
     # Use the WITH-ERS velocity limit for optimization
     optimal_trajectory = nlp_solver.solve(
         v_limit_profile=velocity_profile_with_ers.v,
+        s_limit_profile=velocity_profile_with_ers.s,
         initial_soc=args.initial_soc,
         final_soc_min=args.final_soc_min,
         is_flying_lap=USE_FLYING_LAP

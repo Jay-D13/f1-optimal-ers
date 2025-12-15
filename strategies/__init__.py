@@ -1,11 +1,12 @@
 from .base import BaseStrategy
+from .baselines import TrackingStrategy, GreedyStrategy, TargetSOCStrategy, AlwaysDeployStrategy, SmartRuleBasedStrategy
 
 
 __all__ = [
     'BaseStrategy',
-    'RLStrategy',
-    'DQNStrategy',
-    'DDPGStrategy', 
-    'PPOStrategy',
-    'ERSEnvironment',
+    'TrackingStrategy',
+    'GreedyStrategy',
+    'TargetSOCStrategy',
+    'AlwaysDeployStrategy',
+    'SmartRuleBasedStrategy',
 ]

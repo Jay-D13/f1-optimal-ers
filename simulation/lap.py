@@ -4,8 +4,7 @@ from dataclasses import dataclass
 import time
 
 from models import VehicleDynamicsModel, F1TrackModel
-# from controllers import OptimalTrajectory
-from solvers.base import OptimalTrajectory
+from solvers import OptimalTrajectory
 
 @dataclass
 class LapResult:
