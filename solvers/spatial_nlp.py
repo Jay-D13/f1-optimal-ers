@@ -104,6 +104,8 @@ class SpatialNLPSolver(BaseSolver):
         # Track data arrays
         track_data = self.track.track_data
         gradient_arr = np.resize(track_data.gradient, self.N)
+        
+        radius_arr = np.resize(track_data.radius, self.N)
 
         # =================================================================
         # DECISION VARIABLES
@@ -157,7 +159,7 @@ class SpatialNLPSolver(BaseSolver):
 
             # --- Forces ---
             # Drag (with 2026 active aero adjustment)
-            c_w_a_eff = self._get_effective_drag_coefficient(veh, ers)
+            c_w_a_eff = self._get_effective_drag_coefficient(veh, ers, radius_arr[k])
             F_drag = 0.5 * veh.rho_air * v_k**2 * c_w_a_eff
 
             # Resistances
@@ -267,16 +269,27 @@ class SpatialNLPSolver(BaseSolver):
         else:
             opti.subject_to(P_deploy_k <= ers.max_deployment_power)
 
-    def _get_effective_drag_coefficient(self, veh, ers):
+    def _get_effective_drag_coefficient(self, veh, ers, radius_k: float):
         """
-        Calculate effective drag coefficient with 2026 active aero adjustment.
+        Calculate effective drag coefficient with 2026 Active Aerodynamics.
         
-        Simulates DRS/wing opening for 2026+ regulations with high drag vehicles.
+        Logic:
+        - 2025: Fixed Drag (Standard)
+        - 2026: 
+            - Z-Mode (High Drag) in corners (radius < threshold)
+            - X-Mode (Low Drag) on straights (radius > threshold)
         """
-        c_w_a_eff = veh.c_w_a
-        if ers.regulation_year >= 2026 and c_w_a_eff > 1.0:
-            c_w_a_eff = c_w_a_eff * 0.65  # Simulate active aero reduction
-        return c_w_a_eff
+        c_w_a = veh.c_w_a
+        
+        if ers.regulation_year >= 2026:
+            # Threshold: If radius > 400m, assume we are on a straight (X-Mode)
+            # 2026 regs allow X-mode generally on straights.
+            if abs(radius_k) > 400.0: 
+                return c_w_a * 0.65  # X-Mode: ~35% Drag Reduction -> this is an understimate "The FIA has explicitly stated a target of 55% lower drag in low-drag configuration (X-Mode) compared to today's cars"
+            else:
+                return c_w_a         # Z-Mode: Full Drag for corners
+        
+        return c_w_a
 
     def _configure_solver(self, opti):
         """Configure IPOPT solver with appropriate options."""
