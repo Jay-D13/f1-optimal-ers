@@ -84,25 +84,25 @@ def compare_all_baselines():
     print("  F1 ERS BASELINE COMPARISON")
     print("="*70)
 
-    # 1. Setup
     ers_config = ERSConfig()
     vehicle_config = VehicleConfig.for_monaco()
 
     print("\nLoading Monaco track...")
     track = F1TrackModel(2024, 'Monaco', 'Q', ds=5.0)
+    track.load_from_fastf1('LEC')
     
-    # Try to load track data (use TUMFTM if FastF1 fails)
-    try:
-        track.load_from_fastf1('VER')
-        print("   ✓ Loaded from FastF1")
-    except Exception as e:
-        print(f"   ⚠ FastF1 failed: {e}")
-        print("   Attempting TUMFTM raceline...")
-        try:
-            track.load_from_tumftm_raceline('/path/to/monaco_raceline.csv')
-        except:
-            print("   ✗ Could not load track data")
-            return
+    # some problems sometimes with TUMFTM racelines, gotta fix
+    # try:
+    #     track.load_from_fastf1('VER')
+    #     print("   ✓ Loaded from FastF1")
+    # except Exception as e:
+    #     print(f"   ⚠ FastF1 failed: {e}")
+    #     print("   Attempting TUMFTM raceline...")
+    #     try:
+    #         track.load_from_tumftm_raceline('/path/to/monaco_raceline.csv')
+    #     except:
+    #         print("   ✗ Could not load track data")
+    #         return
 
     vehicle_model = VehicleDynamicsModel(vehicle_config, ers_config)
     initial_soc = 0.5
@@ -110,17 +110,17 @@ def compare_all_baselines():
     results = {}
 
     # -------------------------------------------------------------------------
-    # 2. Reference Profiles
+    #  Reference Profiles
     # -------------------------------------------------------------------------
     
-    # A. "No ERS" Profile (Mechanical Limit)
+    # "No ERS" Profile (Mechanical Limit)
     print("\nComputing 'No ERS' Mechanical Limit...")
     fb_solver_no_ers = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
     no_ers_profile = fb_solver_no_ers.solve(flying_lap=True)
     results['No ERS (Mechanical)'] = profile_to_result(no_ers_profile, initial_soc)
     print(f"   No ERS Time: {no_ers_profile.lap_time:.3f} s")
 
-    # B. "Fast" Profile (With ERS Power) -> For baselines to track
+    # "Fast" Profile (With ERS Power) -> For baselines to track
     # IMPORTANT: Baselines will track this, accounting for ERS in their controls
     print("\nComputing 'Fast' Reference (ICE + Full ERS)...")
     fb_solver_fast = ForwardBackwardSolver(vehicle_model, track, use_ers_power=True)
@@ -128,7 +128,7 @@ def compare_all_baselines():
     print(f"   Fast Time: {ref_profile_fast.lap_time:.3f} s")
 
     # -------------------------------------------------------------------------
-    # 3. Run NLP Optimal Solution First
+    #  Run NLP Optimal Solution First
     # -------------------------------------------------------------------------
     print("\nRunning Offline Optimal (NLP)...")
     optimizer = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
@@ -143,10 +143,9 @@ def compare_all_baselines():
     print(f"   NLP Time: {results['Offline Optimal'].lap_time:.3f}s")
 
     # -------------------------------------------------------------------------
-    # 4. Run Baseline Strategies
+    #  Run Baseline Strategies
     # -------------------------------------------------------------------------
     
-    # Use the FAST profile as reference - baselines must properly account for ERS
     ref_for_baselines = ref_profile_fast
     
     strategies_to_run = [
@@ -160,7 +159,7 @@ def compare_all_baselines():
     for name, Cls, kwargs in strategies_to_run:
         print(f"\nRunning {name}...")
         
-        # Use optimal trajectory for OptimalTrackingStrategy, else use FB profile
+        # optimal trajectory for OptimalTrackingStrategy, else FB profile for the rest
         if name == 'Optimal Tracking':
             ref = optimal_trajectory
             v_start_target = ref.v_opt[0] # Flying lap for baselines
@@ -217,7 +216,6 @@ def print_summary_table(results):
 
 
 def plot_baseline_comparison(results, track, ers_config):
-    """Create comparison plots."""
     
     sorted_keys = sorted(results.keys(), key=lambda k: results[k].lap_time)
     
@@ -234,7 +232,6 @@ def plot_baseline_comparison(results, track, ers_config):
     fig = plt.figure(figsize=(18, 12))
     gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1], hspace=0.3, wspace=0.2)
 
-    # 1. Velocity Profile
     ax1 = plt.subplot(gs[0, 0])
     
     for name in sorted_keys:
@@ -252,7 +249,6 @@ def plot_baseline_comparison(results, track, ers_config):
     ax1.set_xlabel("Track Position (m)")
     ax1.legend(loc='lower right', frameon=True, facecolor='#222')
 
-    # 2. Battery SOC
     ax2 = plt.subplot(gs[0, 1])
     
     ax2.axhline(ers_config.max_soc * 100, color='grey', linestyle=':', alpha=0.5)
@@ -273,7 +269,6 @@ def plot_baseline_comparison(results, track, ers_config):
     ax2.set_ylim(ers_config.min_soc * 100 - 5, ers_config.max_soc * 100 + 5)
     ax2.legend(loc='upper right', frameon=True, facecolor='#222')
 
-    # 3. ERS Power
     ax3 = plt.subplot(gs[1, 0])
     
     for name in sorted_keys:
@@ -281,7 +276,7 @@ def plot_baseline_comparison(results, track, ers_config):
             continue
         res = results[name]
         ls = LINE_STYLES.get(name, '-')
-        # Use positions[:-1] since P_ers has one fewer point
+        # positions[:-1] since P_ers has one fewer point
         n_ers = len(res.P_ers_history)
         ax3.step(res.positions[:n_ers], res.P_ers_history / 1000, 
                  where='post', label=name, color=COLORS.get(name, 'white'), 
@@ -292,7 +287,6 @@ def plot_baseline_comparison(results, track, ers_config):
     ax3.set_ylabel("Power (kW) [+Deploy / -Harvest]")
     ax3.set_xlabel("Track Position (m)")
 
-    # 4. Lap Time Comparison
     ax4 = plt.subplot(gs[1, 1])
     
     names = sorted_keys
@@ -316,7 +310,7 @@ def plot_baseline_comparison(results, track, ers_config):
                  va='center', fontweight='bold', color=colors[i], fontsize=9)
 
     plt.tight_layout()
-    plt.savefig('baseline_comparison.png', 
+    plt.savefig('figures/baseline_comparison.png', 
                 facecolor='#121212', edgecolor='none', dpi=150)
     plt.close()
 
@@ -326,11 +320,10 @@ def plot_diagnostics(results, track):
     
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
     
-    # Select a few key strategies for diagnostics
     diag_strategies = ['Offline Optimal', 'Smart Heuristic', 'Pure Greedy']
     colors = ['#00E676', '#2979FF', '#FFC400']
     
-    # 1. Throttle comparison
+    # Throttle comparison
     ax1 = axes[0, 0]
     for name, color in zip(diag_strategies, colors):
         if name in results:
@@ -344,7 +337,7 @@ def plot_diagnostics(results, track):
     ax1.legend()
     ax1.set_ylim(-0.05, 1.05)
     
-    # 2. Brake comparison  
+    # Brake comparison  
     ax2 = axes[0, 1]
     for name, color in zip(diag_strategies, colors):
         if name in results:
@@ -358,7 +351,7 @@ def plot_diagnostics(results, track):
     ax2.legend()
     ax2.set_ylim(-0.05, 1.05)
     
-    # 3. Velocity tracking error
+    # Velocity tracking error
     ax3 = axes[1, 0]
     optimal = results.get('Offline Optimal')
     if optimal:
@@ -376,7 +369,7 @@ def plot_diagnostics(results, track):
     ax3.set_xlabel("Position (m)")
     ax3.legend()
     
-    # 4. Cumulative time difference
+    # Cumulative time difference
     ax4 = axes[1, 1]
     if optimal:
         for name, color in zip(diag_strategies[1:], colors[1:]):
@@ -393,7 +386,7 @@ def plot_diagnostics(results, track):
     ax4.legend()
     
     plt.tight_layout()
-    plt.savefig('baseline_diagnostics.png',
+    plt.savefig('figures/baseline_diagnostics.png',
                 facecolor='#121212', edgecolor='none', dpi=150)
     plt.close()
 
