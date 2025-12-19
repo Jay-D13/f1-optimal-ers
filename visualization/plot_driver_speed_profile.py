@@ -2,11 +2,10 @@
 Pretty Speed Profile Visualization for Specific Driver
 """
 
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from itertools import groupby
 from pathlib import Path
-import sys
 from scipy.ndimage import uniform_filter1d
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -147,7 +146,6 @@ def plot_multi_driver_speed_profile(track_name='Monaco', year=2024,
         
         # Calculate speed derivative (change per km, not per point)
         # Smooth the speed first to avoid noise
-        from scipy.ndimage import uniform_filter1d
         speeds_smooth = uniform_filter1d(speeds, size=10, mode='nearest')
         
         # Calculate deceleration (km/h per km)
@@ -189,8 +187,7 @@ def plot_multi_driver_speed_profile(track_name='Monaco', year=2024,
                       zorder=1, linewidth=0)
     
     # Add legend entry for braking zones
-    from matplotlib.patches import Patch
-    legend_elements = ax.get_legend_handles_labels()
+    # legend_elements = ax.get_legend_handles_labels()
     
     # Styling
     ax.set_xlabel('Distance (km)', fontweight='bold', fontsize=18)

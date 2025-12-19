@@ -1,7 +1,11 @@
-from .mpc import (
-    ERSModelPredictiveController,
+from .ers_mpc import (
+    ERSMPCController,
+    MPCConfig,
+    CoStateProfile,
 )
 
 __all__ = [
-    'ERSModelPredictiveController',
+    'ERSMPCController',
+    'MPCConfig',
+    'CoStateProfile',
 ]

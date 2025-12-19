@@ -457,21 +457,15 @@ def plot_soc_strategy_laptime_comparison(strategies_data, track_name, save_path=
 # ============================================================================
 
 def generate_individual_plots():
-    """
-    Generate all individual plots for maximum poster flexibility.
-    """
     setup_poster_style()
     
     print("="*80)
     print("GENERATING INDIVIDUAL POSTER PLOTS")
     print("="*80)
     
-    output_dir = Path("poster_plots_individual")
+    output_dir = Path("figures/poster_plots")
     output_dir.mkdir(exist_ok=True)
     
-    # ========================================================================
-    # PART 1: TRACK LAYOUTS (ERS COLORED)
-    # ========================================================================
     print("\n[1/4] Generating individual track ERS layouts...")
     
     tracks = ['Monaco', 'Montreal', 'Monza', 'Spa']
@@ -497,7 +491,6 @@ def generate_individual_plots():
         nlp_solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
         trajectory = nlp_solver.solve(
             v_limit_profile=velocity_profile.v,
-            s_limit_profile=velocity_profile.s,
             initial_soc=0.5,
             final_soc_min=0.3,
             is_flying_lap=True
@@ -537,9 +530,6 @@ def generate_individual_plots():
         if fig:
             plt.close(fig)
     
-    # ========================================================================
-    # PART 2: SOC STRATEGIES (OVERLAPPED)
-    # ========================================================================
     print("\n[2/4] Generating SOC strategy comparison plot...")
     
     track_name = 'Monaco'
@@ -572,7 +562,6 @@ def generate_individual_plots():
         nlp_solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
         trajectory = nlp_solver.solve(
             v_limit_profile=velocity_profile.v,
-            s_limit_profile=velocity_profile.s,
             initial_soc=initial_soc,
             final_soc_min=final_soc,
             is_flying_lap=True
@@ -605,9 +594,6 @@ def generate_individual_plots():
     if fig_bar:
         plt.close(fig_bar)
     
-    # ========================================================================
-    # PART 3: REGULATION COMPARISON
-    # ========================================================================
     print("\n[3/4] Generating regulation comparison plots...")
     
     track_name = 'Monaco'
@@ -631,7 +617,6 @@ def generate_individual_plots():
     nlp_solver_2026 = SpatialNLPSolver(vehicle_model_2026, track, ers_config_2026, ds=5.0)
     trajectory_2026 = nlp_solver_2026.solve(
         v_limit_profile=velocity_profile.v,
-        s_limit_profile=velocity_profile.s,
         initial_soc=0.5,
         final_soc_min=0.3,
         is_flying_lap=True
@@ -648,7 +633,6 @@ def generate_individual_plots():
     
     data_2025['energy_deployed'] = strategies_data['SOC_50_30'].get('energy_deployed', 2.0e6)
     
-    # Generate individual regulation plots
     fig_vel = plot_regulation_velocity_comparison(
         track_name,
         data_2025,
@@ -676,9 +660,6 @@ def generate_individual_plots():
     if fig_soc:
         plt.close(fig_soc)
     
-    # ========================================================================
-    # PART 4: REAL VS OPTIMAL
-    # ========================================================================
     print("\n[4/4] Generating real vs optimal plot...")
     
     track_name = 'Monaco'

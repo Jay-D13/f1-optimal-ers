@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from solvers import (
     ForwardBackwardSolver,
     SpatialNLPSolver,
-    OptimalTrajectory
 )
 from models import F1TrackModel, VehicleDynamicsModel
 from config import ERSConfig, VehicleConfig, get_vehicle_config, get_ers_config
@@ -99,7 +98,7 @@ def main(args):
     print("PHASE 1 - VELOCITY PROFILE (Forward-Backward)")
     print("="*70)
     
-    # Enable Flying Lap!
+    # Enable Flying Lap! -> Flying lap means it's a continuous lap without start from startline
     USE_FLYING_LAP = True # TODO make argument
     
     print(f"\n   Computing theoretical profile WITHOUT ERS (Flying: {USE_FLYING_LAP})...")
@@ -127,7 +126,6 @@ def main(args):
     # Use the WITH-ERS velocity limit for optimization
     optimal_trajectory = nlp_solver.solve(
         v_limit_profile=velocity_profile_with_ers.v,
-        s_limit_profile=velocity_profile_with_ers.s,
         initial_soc=args.initial_soc,
         final_soc_min=args.final_soc_min,
         is_flying_lap=USE_FLYING_LAP
@@ -212,7 +210,7 @@ def main(args):
         
         # Track visualization
         print("\n Track Visualization...")
-        fig_track = visualize_track( # TODO put driver name on plot and fix curves
+        fig_track = visualize_track( # TODO fix track curves scale
             track, 
             track_name=args.track,
             driver_name=args.driver
@@ -272,7 +270,7 @@ def main(args):
             }
             
             animation_path = run_manager.plots_dir / "05_lap_animation.gif"
-            fig_anim, anim = visualize_lap_animated(
+            fig_anim, anim = visualize_lap_animated( # TODO fix speed slow down and speed up of ego car
                 track,
                 results_dict_for_anim,
                 strategy_name="Optimal ERS",
@@ -302,7 +300,6 @@ if __name__ == "__main__":
             python main.py --track Spa --year 2023 --driver VER --plot
             
             python main.py --track Monaco --solver nlp --plot --save-animation
-            TODO: for the presentation -> different start and end SOCs
         """
     )
     

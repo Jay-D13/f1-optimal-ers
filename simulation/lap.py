@@ -221,17 +221,6 @@ class LapSimulator:
             completed=True,
         )
 
-# class RaceSimulator:
-#     """Multi-lap race simulation"""
-    
-#     def __init__(self, vehicle_model, track_model):
-#         self.vehicle = vehicle_model
-#         self.track = track_model
-    
-#     def simulate_race(self, n_laps: int, controller,
-#                       initial_soc: float = 0.5) -> List[LapResult]:
-#         raise NotImplementedError()
-
 def compare_strategies(vehicle_model,
                        track_model,
                        offline_trajectory: OptimalTrajectory,
