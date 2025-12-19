@@ -298,7 +298,7 @@ class SpatialNLPSolver(BaseSolver):
             "ipopt.print_level": 4,
             "ipopt.tol": 1e-4,
             "ipopt.acceptable_tol": 1e-3,
-            "ipopt.linear_solver": "ma97",
+            "ipopt.linear_solver": "mumps", # ma97
             "ipopt.nlp_scaling_method": "gradient-based",
         }
 

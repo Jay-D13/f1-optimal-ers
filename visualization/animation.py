@@ -9,7 +9,7 @@ from models import F1TrackModel
 def visualize_lap_animated(track_model: F1TrackModel, 
                           results: Dict, 
                           strategy_name: str = "MPC",
-                          save_path: str = "../figures/lap_animation.gif"):
+                          save_path: str = "figures/figures/lap_animation.gif"):
     """Create animated visualization of car going around track"""
     
     

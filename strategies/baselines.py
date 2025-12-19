@@ -2,198 +2,479 @@ import numpy as np
 from typing import Dict, Tuple
 from scipy.interpolate import interp1d
 
-from strategies.base import BaseStrategy
 from config import VehicleConfig, ERSConfig
-from models import F1TrackModel
 
-class TrackingStrategy(BaseStrategy):
-    """
-    Physics-Aware Tracking Strategy.
-    Uses Feedforward (Inverse Dynamics) to calculate the exact Throttle/Brake 
-    needed to match the reference acceleration and overcome drag.
-    """
+class TrackingStrategy:
+
     def __init__(self, 
                  vehicle_config: VehicleConfig, 
                  ers_config: ERSConfig, 
-                 track_model: F1TrackModel,
-                 reference_profile = None): # Pass the full profile object!
-        super().__init__(vehicle_config, ers_config, track_model)
-        
+                 track_model,
+                 reference_profile=None):
+        self.vehicle = vehicle_config
+        self.ers = ers_config
+        self.track = track_model
         self.profile = reference_profile
         
         if reference_profile is not None:
-            # Interpolate Velocity
+
+            if hasattr(reference_profile, 'v'):
+                v_prof = reference_profile.v
+            elif hasattr(reference_profile, 'v_opt'):
+                v_prof = reference_profile.v_opt
+            else:
+                raise AttributeError(f"Reference profile {type(reference_profile)} must have 'v' or 'v_opt'")
+            
+            if hasattr(reference_profile, 'a_x'):
+                a_prof = reference_profile.a_x
+            else:
+                s_arr = reference_profile.s
+                dv_ds = np.gradient(v_prof, s_arr)
+                a_prof = v_prof * dv_ds
+
             self.v_ref_interp = interp1d(
                 reference_profile.s, 
-                reference_profile.v, 
+                v_prof, 
                 kind='linear', fill_value="extrapolate"
             )
-            # Interpolate Acceleration (Crucial for Feedforward)
+            # Interpolate Acceleration
             self.a_ref_interp = interp1d(
                 reference_profile.s, 
-                reference_profile.a_x, 
+                a_prof, 
                 kind='linear', fill_value="extrapolate"
             )
         else:
             self.v_ref_interp = None
             self.a_ref_interp = None
             
-        # Gains can be lower now because Feedforward does the heavy lifting
-        self.kp_accel = 0.5
-        self.kp_brake = 0.5
+        # PD gains for velocity tracking
+        self.kp_v = 2.0   # Proportional gain on velocity error
 
     @property
     def name(self) -> str:
-        return "TrackingStrategy (FF)"
+        return "TrackingStrategy"
 
-    def get_driver_commands(self, state: np.ndarray, track_info: Dict) -> Tuple[float, float, float]:
-        """
-        Returns: (throttle, brake, v_target)
-        Uses Inverse Dynamics: F_req = m*a_ref + F_drag + F_gravity
-        """
-        s, v, soc = state
-        
-        # 1. Get Reference State
-        v_target = float(self.v_ref_interp(s))
-        a_target = float(self.a_ref_interp(s))
-        
-        # 2. Feedforward Physics (Inverse Dynamics)
-        # Calculate forces resisting the car RIGHT NOW
+    def _compute_forces(self, v: float, gradient: float, radius: float = 1000.0) -> Dict[str, float]:
+        """Compute all forces at current state, including grip limits."""
         mass = self.vehicle.mass
         g = self.vehicle.g
+        rho = self.vehicle.rho_air
+        c_w_a = self.vehicle.c_w_a
+        c_z_a = self.vehicle.c_z_a_f + self.vehicle.c_z_a_r
+        cr = self.vehicle.cr
         
-        # Aerodynamic Drag: F_drag = 0.5 * rho * Cd * A * v^2
-        # (Simplified using your config constant c_w_a)
-        f_drag = 0.5 * self.vehicle.rho_air * self.vehicle.c_w_a * v**2
+        # Aerodynamic forces
+        q = 0.5 * rho * v**2
+        f_drag = q * c_w_a
+        f_downforce = q * c_z_a
         
-        # Rolling Resistance
-        # Approximate Normal force (ignoring aero downforce for rolling resistance approx is fine, 
-        # or use full formula if you want perfection)
+        # Normal force (weight + downforce)
+        f_normal = mass * g * np.cos(gradient) + f_downforce
+        
+        # Rolling resistance
+        f_roll = cr * f_normal
+        
+        # Gravity component
+        f_grav = mass * g * np.sin(gradient)
+        
+        # Grip calculation (friction circle)
+        mu_avg = 0.5 * (1.65 + 1.95)  # Average friction coefficient
+        f_grip_total = mu_avg * f_normal
+        
+        # Lateral force from cornering
+        safe_radius = max(radius, 15.0)
+        a_lat = v**2 / safe_radius
+        f_lat = mass * a_lat
+        
+        # Remaining grip for longitudinal
+        f_grip_long_sq = f_grip_total**2 - f_lat**2
+        f_grip_long = np.sqrt(max(f_grip_long_sq, 100.0))
+        
+        return {
+            'drag': f_drag,
+            'roll': f_roll,
+            'gravity': f_grav,
+            'normal': f_normal,
+            'total_resistance': f_drag + f_roll + f_grav,
+            'grip_total': f_grip_total,
+            'grip_long': f_grip_long,
+            'lat_force': f_lat,
+            'is_grip_limited': f_lat > 0.7 * f_grip_total  # >70% grip used for cornering
+        }
+
+    def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
+        """
+        Compute control [P_ers, throttle, brake] to track reference.
+        """
+        s, v, soc = state
         grad = track_info.get('gradient', 0.0)
-        f_roll = self.vehicle.cr * mass * g * np.cos(grad)
+        radius = track_info.get('radius', 1000.0)
         
-        # Gravity (Hill Climbing)
-        f_grav = mass * g * np.sin(grad)
+        # Get reference
+        v_ref = float(self.v_ref_interp(s)) if self.v_ref_interp else v
+        a_ref = float(self.a_ref_interp(s)) if self.a_ref_interp else 0.0
         
-        # Newton's Second Law: F_net = m * a
-        # F_powertrain - F_drag - F_roll - F_grav = m * a_target
-        # F_powertrain_required = m * a_target + F_drag + F_roll + F_grav
-        f_req = (mass * a_target) + f_drag + f_roll + f_grav
+        # Compute required force (feedforward + feedback)
+        throttle, brake, P_ers = self._compute_tracking_control(
+            v, v_ref, a_ref, grad, radius, soc
+        )
         
-        # 3. Feedback Correction (PID)
-        # Fix small drifts from numerical error
-        v_error = v_target - v
-        f_correction = 0.0
+        return np.array([P_ers, throttle, brake])
+    
+    def _compute_tracking_control(self, v: float, v_ref: float, a_ref: float, 
+                                   gradient: float, radius: float, soc: float
+                                   ) -> Tuple[float, float, float]:
+        """
+        Compute throttle/brake/ERS to track reference.
         
-        if v_error > 0:
-            f_correction = self.kp_accel * v_error * mass # Convert accel demand to Force
-        else:
-            f_correction = self.kp_brake * v_error * mass
-            
-        f_total_cmd = f_req + f_correction
+        Returns: (throttle, brake, P_ers)
+        """
+        mass = self.vehicle.mass
+        v_safe = max(v, 5.0)
         
-        # 4. Map Force to Throttle/Brake
+        # Compute forces including grip limits
+        forces = self._compute_forces(v, gradient, radius)
+        
+        # Velocity error for feedback
+        v_error = v_ref - v
+        
+        # Feedforward: force needed to achieve reference acceleration
+        # Plus feedback correction based on velocity error
+        a_cmd = a_ref + self.kp_v * v_error
+        
+        # Total force required
+        f_required = mass * a_cmd + forces['total_resistance']
+        
+        # Default: no ERS
+        P_ers = 0.0
         throttle = 0.0
         brake = 0.0
         
-        if f_total_cmd > 0:
-            # Acceleration
-            # Throttle % ~ Force / Max_Force_at_Current_Speed
-            # Power limited: P = F*v -> F_max = P_max / v
-            # Grip limited: F_max = mu * F_z (simplified)
+        if f_required > 0:
+            # Need propulsion
+            P_required = f_required * v_safe
             
-            # Simple approx: F_max = Power / v
-            p_avail = self.vehicle.pow_max_ice
-            f_max_engine = p_avail / max(v, 5.0)
-            
-            throttle = np.clip(f_total_cmd / f_max_engine, 0.0, 1.0)
+            # Throttle assuming no ERS deployment
+            throttle = P_required / self.vehicle.pow_max_ice
+            throttle = np.clip(throttle, 0.0, 1.0)
             
         else:
-            # Braking
-            # Brake % ~ -Force / Max_Braking_Force
-            brake = np.clip(-f_total_cmd / self.vehicle.max_brake_force, 0.0, 1.0)
-            
-        return throttle, brake, v_target
+            # Need braking
+            brake = np.clip(-f_required / self.vehicle.max_brake_force, 0.0, 1.0)
+        
+        return throttle, brake, P_ers
 
-    def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
-        return np.array([0.0, 0.0, 0.0])
-
-# --- UPDATED BASELINES THAT INHERIT THE NEW PHYSICS ---
 
 class GreedyStrategy(TrackingStrategy):
+    """
+    Greedy ERS: Deploy when accelerating hard, harvest when braking.
+    
+    FIXED: When deploying ERS, reduce throttle so total power = required power.
+    FIXED: Don't deploy ERS when grip-limited (would waste energy).
+    """
     @property
-    def name(self) -> str: return "Greedy (KERS)"
+    def name(self) -> str:
+        return "Greedy (KERS)"
     
     def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
         s, v, soc = state
-        throttle, brake, _ = self.get_driver_commands(state, track_info)
+        grad = track_info.get('gradient', 0.0)
+        radius = track_info.get('radius', 1000.0)
+        v_safe = max(v, 5.0)
+        mass = self.vehicle.mass
+        
+        # Get reference
+        v_ref = float(self.v_ref_interp(s)) if self.v_ref_interp else v
+        a_ref = float(self.a_ref_interp(s)) if self.a_ref_interp else 0.0
+        
+        # Compute forces including grip
+        forces = self._compute_forces(v, grad, radius)
+        
+        # Feedback control
+        v_error = v_ref - v
+        a_cmd = a_ref + self.kp_v * v_error
+        f_required = mass * a_cmd + forces['total_resistance']
         
         P_ers = 0.0
-        # ERS Logic (Same as before)
-        if brake > 0.05 and soc < self.ers.max_soc:
-            P_ers = -self.ers.max_recovery_power
-        elif throttle > 0.85 and v > 20.0 and soc > self.ers.min_soc + 0.05:
-            P_ers = self.ers.max_deployment_power
+        throttle = 0.0
+        brake = 0.0
+        
+        if f_required > 0:
+            # Need propulsion
+            P_required = f_required * v_safe
             
+            # Check if we're grip-limited (in a corner)
+            # Don't deploy ERS if grip-limited - it would waste energy!
+            is_grip_limited = forces['is_grip_limited']
+            
+            # Greedy logic: deploy ERS when accelerating hard AND not grip limited
+            should_deploy = (
+                a_cmd > 3.0 and                    # Significant acceleration
+                v > 25.0 and                       # Not too slow
+                soc > self.ers.min_soc + 0.05 and  # Have charge buffer
+                not is_grip_limited                # NOT in corner (would waste energy)
+            )
+            
+            if should_deploy:
+                # Deploy full ERS, REDUCE THROTTLE to compensate
+                P_ers = self.ers.max_deployment_power
+                P_ice_needed = max(0, P_required - P_ers)
+                throttle = P_ice_needed / self.vehicle.pow_max_ice
+            else:
+                # ICE only
+                throttle = P_required / self.vehicle.pow_max_ice
+            
+            throttle = np.clip(throttle, 0.0, 1.0)
+            
+        else:
+            # Need braking - harvest energy
+            if soc < self.ers.max_soc - 0.02:
+                P_ers = -self.ers.max_recovery_power
+            
+            brake = np.clip(-f_required / self.vehicle.max_brake_force, 0.0, 1.0)
+        
         return np.array([P_ers, throttle, brake])
 
+
+class AlwaysDeployStrategy(TrackingStrategy):
+    """
+    Always deploy ERS when accelerating (aggressive energy use).
+    
+    FIXED: Reduce throttle when deploying ERS.
+    FIXED: Don't deploy when grip-limited.
+    """
+    @property
+    def name(self) -> str:
+        return "Always Deploy"
+    
+    def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
+        s, v, soc = state
+        grad = track_info.get('gradient', 0.0)
+        radius = track_info.get('radius', 1000.0)
+        v_safe = max(v, 5.0)
+        mass = self.vehicle.mass
+        
+        v_ref = float(self.v_ref_interp(s)) if self.v_ref_interp else v
+        a_ref = float(self.a_ref_interp(s)) if self.a_ref_interp else 0.0
+        
+        forces = self._compute_forces(v, grad, radius)
+        v_error = v_ref - v
+        a_cmd = a_ref + self.kp_v * v_error
+        f_required = mass * a_cmd + forces['total_resistance']
+        
+        P_ers = 0.0
+        throttle = 0.0
+        brake = 0.0
+        
+        if f_required > 0:
+            P_required = f_required * v_safe
+            
+            # Always deploy when accelerating (if we have charge and not grip-limited)
+            should_deploy = (
+                soc > self.ers.min_soc and
+                not forces['is_grip_limited']  # Don't waste energy in corners
+            )
+            
+            if should_deploy:
+                P_ers = self.ers.max_deployment_power
+                P_ice_needed = max(0, P_required - P_ers)
+                throttle = P_ice_needed / self.vehicle.pow_max_ice
+            else:
+                throttle = P_required / self.vehicle.pow_max_ice
+            
+            throttle = np.clip(throttle, 0.0, 1.0)
+        else:
+            if soc < self.ers.max_soc - 0.02:
+                P_ers = -self.ers.max_recovery_power
+            brake = np.clip(-f_required / self.vehicle.max_brake_force, 0.0, 1.0)
+        
+        return np.array([P_ers, throttle, brake])
+
+
 class TargetSOCStrategy(TrackingStrategy):
+    """
+    Maintain target SOC - deploy when above target, harvest when below.
+    
+    FIXED: Reduce throttle when deploying ERS.
+    FIXED: Don't deploy when grip-limited.
+    """
     def __init__(self, vehicle_config, ers_config, track_model, reference_profile, target_soc=0.5):
         super().__init__(vehicle_config, ers_config, track_model, reference_profile)
         self.target_soc = target_soc
-        self.kp_soc = 2e6 
+        self.soc_deadband = 0.05
 
     @property
-    def name(self) -> str: return f"Target SOC ({self.target_soc*100:.0f}%)"
+    def name(self) -> str:
+        return f"Target SOC ({self.target_soc*100:.0f}%)"
 
     def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
         s, v, soc = state
-        throttle, brake, _ = self.get_driver_commands(state, track_info)
+        grad = track_info.get('gradient', 0.0)
+        radius = track_info.get('radius', 1000.0)
+        v_safe = max(v, 5.0)
+        mass = self.vehicle.mass
+        
+        v_ref = float(self.v_ref_interp(s)) if self.v_ref_interp else v
+        a_ref = float(self.a_ref_interp(s)) if self.a_ref_interp else 0.0
+        
+        forces = self._compute_forces(v, grad, radius)
+        v_error = v_ref - v
+        a_cmd = a_ref + self.kp_v * v_error
+        f_required = mass * a_cmd + forces['total_resistance']
         
         P_ers = 0.0
-        if brake > 0.05 and soc < self.ers.max_soc:
-            P_ers = -self.ers.max_recovery_power
-        elif throttle > 0.5:
-            soc_error = soc - self.target_soc
-            P_request = soc_error * self.kp_soc
-            P_ers = np.clip(P_request, -self.ers.max_recovery_power, self.ers.max_deployment_power)
+        throttle = 0.0
+        brake = 0.0
+        
+        # SOC-based decision
+        soc_error = soc - self.target_soc
+        
+        if f_required > 0:
+            P_required = f_required * v_safe
             
-            if soc <= self.ers.min_soc: P_ers = max(0, P_ers)
-            if soc >= self.ers.max_soc: P_ers = min(0, P_ers)
-
-        return np.array([P_ers, throttle, brake])
-
-class AlwaysDeployStrategy(TrackingStrategy):
-    @property
-    def name(self) -> str: return "Always Deploy"
-    
-    def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
-        s, v, soc = state
-        throttle, brake, _ = self.get_driver_commands(state, track_info)
+            # Deploy if above target SOC and not grip-limited
+            should_deploy = (
+                soc_error > self.soc_deadband and 
+                soc > self.ers.min_soc and
+                not forces['is_grip_limited']
+            )
+            
+            if should_deploy:
+                # Proportional deployment based on SOC error
+                deploy_fraction = min(1.0, (soc_error - self.soc_deadband) / 0.2)
+                P_ers = deploy_fraction * self.ers.max_deployment_power
+                P_ice_needed = max(0, P_required - P_ers)
+                throttle = P_ice_needed / self.vehicle.pow_max_ice
+            else:
+                throttle = P_required / self.vehicle.pow_max_ice
+            
+            throttle = np.clip(throttle, 0.0, 1.0)
+        else:
+            # Always harvest when braking (if below max SOC)
+            if soc < self.ers.max_soc - 0.02:
+                P_ers = -self.ers.max_recovery_power
+            brake = np.clip(-f_required / self.vehicle.max_brake_force, 0.0, 1.0)
         
-        P_ers = 0.0
-        if brake > 0.05 and soc < self.ers.max_soc:
-            P_ers = -self.ers.max_recovery_power
-        elif throttle > 0.1 and soc > self.ers.min_soc:
-            P_ers = self.ers.max_deployment_power
-                
         return np.array([P_ers, throttle, brake])
+
 
 class SmartRuleBasedStrategy(TrackingStrategy):
+    """
+    Smart heuristics: Deploy on straights when grip-available, harvest on braking.
+    
+    FIXED: Reduce throttle when deploying ERS.
+    FIXED: Use actual grip calculations instead of radius heuristics.
+    """
     @property
-    def name(self) -> str: return "Smart Heuristic"
+    def name(self) -> str:
+        return "Smart Heuristic"
     
     def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
         s, v, soc = state
-        throttle, brake, _ = self.get_driver_commands(state, track_info)
+        grad = track_info.get('gradient', 0.0)
+        radius = track_info.get('radius', 1000.0)
+        v_safe = max(v, 5.0)
+        mass = self.vehicle.mass
+        
+        v_ref = float(self.v_ref_interp(s)) if self.v_ref_interp else v
+        a_ref = float(self.a_ref_interp(s)) if self.a_ref_interp else 0.0
+        
+        forces = self._compute_forces(v, grad, radius)
+        v_error = v_ref - v
+        a_cmd = a_ref + self.kp_v * v_error
+        f_required = mass * a_cmd + forces['total_resistance']
         
         P_ers = 0.0
-        if brake > 0.05 and soc < self.ers.max_soc:
-            P_ers = -self.ers.max_recovery_power
-        elif throttle > 0.95 or (throttle > 0.5 and v < 50.0):
-            is_efficient_speed = 60/3.6 < v < 320/3.6
-            has_buffer = soc > self.ers.min_soc + 0.05
-            if is_efficient_speed and has_buffer:
+        throttle = 0.0
+        brake = 0.0
+        
+        # Determine conditions
+        is_straight = radius > 300
+        is_efficient_deploy = 20.0 < v < 90.0  # Sweet spot for ERS
+        has_available_grip = not forces['is_grip_limited']  # Key check!
+        
+        if f_required > 0:
+            P_required = f_required * v_safe
+            
+            # Smart deployment: only deploy when it will be useful
+            should_deploy = (
+                is_straight and                    # On straight
+                is_efficient_deploy and           # In efficient speed range
+                a_cmd > 2.0 and                   # Actually accelerating
+                soc > self.ers.min_soc + 0.05 and # Have charge buffer
+                has_available_grip                # Grip available to use the power!
+            )
+            
+            if should_deploy:
                 P_ers = self.ers.max_deployment_power
-                
+                P_ice_needed = max(0, P_required - P_ers)
+                throttle = P_ice_needed / self.vehicle.pow_max_ice
+            else:
+                throttle = P_required / self.vehicle.pow_max_ice
+            
+            throttle = np.clip(throttle, 0.0, 1.0)
+        else:
+            # Harvest under braking
+            if soc < self.ers.max_soc - 0.02:
+                P_ers = -self.ers.max_recovery_power
+            brake = np.clip(-f_required / self.vehicle.max_brake_force, 0.0, 1.0)
+        
+        return np.array([P_ers, throttle, brake])
+
+
+class OptimalTrackingStrategy(TrackingStrategy):
+
+    def __init__(self, vehicle_config, ers_config, track_model, reference_profile=None, optimal_trajectory=None):
+
+        traj = optimal_trajectory if optimal_trajectory is not None else reference_profile
+        
+        super().__init__(vehicle_config, ers_config, track_model, traj)
+        
+        if traj is not None and hasattr(traj, 'P_ers_opt'):
+            n_ers = len(traj.P_ers_opt)
+            self.P_ers_interp = interp1d(
+                traj.s[:n_ers],
+                traj.P_ers_opt,
+                kind='linear', fill_value="extrapolate" 
+            )
+        else:
+            self.P_ers_interp = None
+    
+    @property
+    def name(self) -> str:
+        return "Optimal Tracking"
+    
+    def get_control(self, state: np.ndarray, track_info: Dict) -> np.ndarray:
+        s, v, soc = state
+        grad = track_info.get('gradient', 0.0)
+        radius = track_info.get('radius', 1000.0)
+        v_safe = max(v, 5.0)
+        mass = self.vehicle.mass
+        
+        v_ref = float(self.v_ref_interp(s)) if self.v_ref_interp else v
+        a_ref = float(self.a_ref_interp(s)) if self.a_ref_interp else 0.0
+        P_ers_ref = float(self.P_ers_interp(s)) if self.P_ers_interp else 0.0
+        
+        forces = self._compute_forces(v, grad, radius)
+        v_error = v_ref - v
+        a_cmd = a_ref + self.kp_v * v_error
+        f_required = mass * a_cmd + forces['total_resistance']
+        
+        # Use optimal ERS (clamped by SOC limits)
+        P_ers = P_ers_ref
+        if P_ers > 0 and soc <= self.ers.min_soc:
+            P_ers = 0.0
+        if P_ers < 0 and soc >= self.ers.max_soc:
+            P_ers = 0.0
+        
+        throttle = 0.0
+        brake = 0.0
+        
+        if f_required > 0:
+            P_required = f_required * v_safe
+            P_ice_needed = max(0, P_required - max(0, P_ers))
+            throttle = np.clip(P_ice_needed / self.vehicle.pow_max_ice, 0.0, 1.0)
+        else:
+            brake = np.clip(-f_required / self.vehicle.max_brake_force, 0.0, 1.0)
+        
         return np.array([P_ers, throttle, brake])

@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 from itertools import groupby
 
 def visualize_track(track_model, track_name=None, driver_name=None, save_path=None):
-    """Visualize the track layout and properties (Optimized)"""
     if track_model.telemetry_data is None:
         print("No telemetry data available for visualization")
         return
@@ -81,7 +80,7 @@ def visualize_track(track_model, track_name=None, driver_name=None, save_path=No
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    plt.suptitle(f'{track_name} Analysis: {track_model.year}', 
+    plt.suptitle(f"{track_name} Analysis of {driver_name}'s fastest lap in {track_model.year}", 
                 fontsize=14, fontweight='bold')
     plt.tight_layout()
     

@@ -202,7 +202,7 @@ class F1TrackModel:
         self.data_source = 'fastf1'
         
         print(f"   ✓ Loaded {n_points} points from FastF1")
-        return self
+        return self, lap['Driver']
 
     def _compute_curvature_smoothed(self, 
                                     x: np.ndarray, 

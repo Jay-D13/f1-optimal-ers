@@ -13,33 +13,27 @@ from .spatial_nlp import (
     SpatialNLPSolver,
 )
 
-from .ecms import (
-    ECMSSolver,
-    AdaptiveECMSSolver,
-    TelemetryECMSSolver,
-    ECMSConfig,
-)
-
-# from .pmp_analytical import (
-#     PMPSolver,
-#     PMPAnalyticalSolver,
+# from .lap_time_map import (
+#     LapTimeMapGenerator,
+#     LapTimeMapConfig,
+#     LapTimePredictor,
 # )
 
 __all__ = [
+    # Base classes
     'BaseSolver',
     'VelocityProfileSolver', 
     'OptimalTrajectory',
     'VelocityProfile',
     
+    # Velocity profile
     'ForwardBackwardSolver',
+    
+    # Offline optimization
     'SpatialNLPSolver',
     
-    'ECMSSolver',
-    'AdaptiveECMSSolver', 
-    'TelemetryECMSSolver',
-    'ECMSConfig',
-    
-    # 'PMPSolver', 
-    # 'PMPAnalyticalSolver',
-    
+    # Race strategy
+    # 'LapTimeMapGenerator',
+    # 'LapTimeMapConfig',
+    # 'LapTimePredictor',
 ]
