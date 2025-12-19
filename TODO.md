@@ -1,7 +1,0 @@
-- [ ] README for baselines
-- [ ] Polish visualizations
-- [ ] Global project README
-- [ ] NLP equations, physics used and car modeling in /docs
-- [ ] Multi lap MPC
-- [ ] Instead of assuming velocity changes linearly between steps (Trapezoidal), we model the state trajectory within each segment as a 3rd-degree polynomial -> NLP using 3rd-Order Gauss-Legendre Collocation
-- [ ] GUI for visualizing results -> able to select tracks, cars, parameters, etc. (maybe slightly change the trajectory? Very technical though)
