@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/poster.png" alt="F1 ERS Optimal Control - Project Poster" width="100%"/>
-</p>
-
 <h1 align="center">🏎️ F1 ERS Optimal Control</h1>
 
 <p align="center">
@@ -14,7 +10,9 @@
 
 ---
 
-<!-- insert poster picture TODO put in docs/poster.png -->
+<p align="center">
+  <img src="docs/poster.png" alt="F1 ERS Optimal Control - Project Poster" width="50%"/>
+</p>
 
 ---
 
