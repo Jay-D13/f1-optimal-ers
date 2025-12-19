@@ -1,18 +1,9 @@
-"""
-Individual Poster Plots - Each subplot as a separate figure
-
-Generates standalone plots for maximum poster flexibility:
-- Each track gets its own file
-- Each comparison gets its own file
-- Easy to arrange manually in poster software
-"""
-
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import VehicleConfig, get_vehicle_config, get_ers_config
 from models import F1TrackModel, VehicleDynamicsModel

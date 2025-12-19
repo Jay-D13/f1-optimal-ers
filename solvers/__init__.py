@@ -13,11 +13,11 @@ from .spatial_nlp import (
     SpatialNLPSolver,
 )
 
-from .lap_time_map import (
-    LapTimeMapGenerator,
-    LapTimeMapConfig,
-    LapTimePredictor,
-)
+# from .lap_time_map import (
+#     LapTimeMapGenerator,
+#     LapTimeMapConfig,
+#     LapTimePredictor,
+# )
 
 __all__ = [
     # Base classes
@@ -33,7 +33,7 @@ __all__ = [
     'SpatialNLPSolver',
     
     # Race strategy
-    'LapTimeMapGenerator',
-    'LapTimeMapConfig',
-    'LapTimePredictor',
+    # 'LapTimeMapGenerator',
+    # 'LapTimeMapConfig',
+    # 'LapTimePredictor',
 ]

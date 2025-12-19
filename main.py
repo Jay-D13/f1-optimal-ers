@@ -64,6 +64,7 @@ def main(args):
     print("="*70)
     
     track = F1TrackModel(year=args.year, gp=args.track, ds=5.0)
+    driver = args.driver #if args.driver else 'VER' # DU DU DU DUUU MAX VERSTAPPEN
     
     # Try TUMFTM raceline first, fallback to FastF1
     tumftm_path = Path(f'data/racelines/{args.track.lower()}.csv')
@@ -74,13 +75,14 @@ def main(args):
     else:
         print(f"   Loading from FastF1 ({args.year} {args.track})...")
         try:
-            track.load_from_fastf1(driver=args.driver)
+            _, driver = track.load_from_fastf1(driver=args.driver)
         except Exception as e:
             print(f"   ⚠ FastF1 failed: {e}")
             print("   Please provide a TUMFTM raceline or check FastF1 cache.")
             return
     
     print(f"   Track loaded: {track.total_length:.0f}m, {len(track.segments)} segments")
+    print(f"   Driver for telemetry: {driver}")
     
     v_max = track.compute_speed_limits(vehicle_config)
 
@@ -213,7 +215,7 @@ def main(args):
         fig_track = visualize_track( # TODO fix track curves scale
             track, 
             track_name=args.track,
-            driver_name=args.driver
+            driver_name=driver
         )
         run_manager.save_plot(fig_track, '01_track_analysis')
         plt.close(fig_track)

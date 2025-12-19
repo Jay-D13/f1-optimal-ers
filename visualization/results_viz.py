@@ -140,7 +140,7 @@ def create_comparison_plot(track: F1TrackModel,
     ax1.plot(s_km, velocity_no_ers * 3.6, 'r--', 
              linewidth=2, alpha=0.7, label='Max (No ERS)')
     ax1.plot(s_km, velocity_with_ers * 3.6, 'orange', 
-             linewidth=2, alpha=0.7, label='Max (With ERS)')
+             linewidth=2, alpha=0.7, label='Max (Unlim. ERS)')
     ax1.plot(s_km, optimal_trajectory.v_opt * 3.6, 'b-', 
              linewidth=1.5, label='Optimal Strategy')
     ax1.set_ylabel('Velocity (km/h)')

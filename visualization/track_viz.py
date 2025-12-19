@@ -80,7 +80,7 @@ def visualize_track(track_model, track_name=None, driver_name=None, save_path=No
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    plt.suptitle(f'{track_name} Analysis of {driver_name} fastest lap in {track_model.year}', 
+    plt.suptitle(f"{track_name} Analysis of {driver_name}'s fastest lap in {track_model.year}", 
                 fontsize=14, fontweight='bold')
     plt.tight_layout()
     

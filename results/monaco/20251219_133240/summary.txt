@@ -1,0 +1,40 @@
+
+        ======================================================================
+        F1 ERS OPTIMIZATION RESULTS - MONACO
+        ======================================================================
+        Regulations Year:      2025
+
+        TRACK INFORMATION:
+        Track:                 Monaco
+        Year of track data:    2024
+        Total Length:          3265 m
+        Number of Segments:    653
+
+        LAP TIME PERFORMANCE:
+        Lap Time (No ERS):      66.605 s
+        Lap Time (With ERS):    64.929 s
+        Lap Time (Optimal):     64.036 s
+        
+        Improvement vs No ERS:  2.569 s (3.86%)
+        Gap to Theoretical:     -0.893 s
+
+        SOLVER INFORMATION:
+        Status:                 optimal
+        Solve Time:             4.97 s
+        Solver Type:            nlp
+
+        ENERGY MANAGEMENT:
+        Initial SOC:            50.0%
+        Final SOC:              30.0%
+        Energy Deployed:        2.470 MJ
+        Energy Recovered:       2.000 MJ
+        Net Energy Used:        0.470 MJ
+        Recovery Efficiency:    81.0%
+
+        VELOCITY STATISTICS:
+        No ERS Profile:         54 - 274 km/h
+        With ERS Profile:       54 - 292 km/h
+        Optimal Strategy:       55 - 289 km/h (avg: 209 km/h)
+
+        ======================================================================
+    
