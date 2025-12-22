@@ -3,6 +3,11 @@ Spatial-Domain NLP Solver for ERS Optimization
 
 Offline optimizer using direct collocation in spatial domain.
 
+Different integration schemes:
+- Euler (1st order) - Fast, less accurate
+- Trapezoidal (2nd order) - Good balance
+- Hermite-Simpson (4th order) - High accuracy
+
 Problem Formulation:
     minimize    T = ∑(ds / v[k])              (lap time)
     subject to: 
@@ -14,11 +19,20 @@ Problem Formulation:
 """
 
 import time
+from enum import Enum
+from typing import Literal, Tuple
 
 import casadi as ca
 import numpy as np
 
 from solvers import BaseSolver, OptimalTrajectory
+
+
+class CollocationMethod(Enum):
+    """Available collocation/integration methods."""
+    EULER = "euler"                    # 1st order - explicit Euler
+    TRAPEZOIDAL = "trapezoidal"        # 2nd order - implicit trapezoidal
+    HERMITE_SIMPSON = "hermite_simpson" # 4th order - Hermite-Simpson
 
 
 class SpatialNLPSolver(BaseSolver):
@@ -27,9 +41,18 @@ class SpatialNLPSolver(BaseSolver):
     Optimizes lap time subject to energy budget and thermal/grip limits.
     """
 
-    def __init__(self, vehicle_model, track_model, ers_config, ds: float = 5.0):
+    def __init__(
+        self, 
+        vehicle_model, 
+        track_model, 
+        ers_config, 
+        ds: float = 5.0,
+        collocation_method: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
+    ):
         super().__init__(vehicle_model, track_model, ers_config)
         self.ds = ds
+
+        self.collocation_method = CollocationMethod(collocation_method)
 
         # Discretization
         self.N = int(track_model.total_length / ds)
@@ -53,11 +76,12 @@ class SpatialNLPSolver(BaseSolver):
             v_limit_profile: Maximum velocity profile from grip limits
             initial_soc: Starting state of charge (0-1)
             final_soc_min: Minimum final state of charge
+            is_flying_lap: If True, enforce V[0] == V[-1]
 
         Returns:
             OptimalTrajectory containing solution
         """
-        self._log(f"Setting up NLP with {self.N} nodes...")
+        self._log(f"Setting up NLP with {self.N} nodes using {self.collocation_method.value} collocation..")
         start_time = time.time()
 
         # Ensure v_limit is the right size
@@ -86,6 +110,51 @@ class SpatialNLPSolver(BaseSolver):
         except RuntimeError as e:
             self._log(f"❌ Optimization failed: {e}")
             raise
+        
+    def _compute_derivatives(
+        self, 
+        v, soc, 
+        P_deploy, P_harvest, throttle, brake,
+        gradient, radius, 
+        veh, ers
+    ) -> Tuple[ca.MX, ca.MX, ca.MX, ca.MX, ca.MX]:
+        """
+        Returns: (dv_ds, dsoc_ds, F_prop, F_brake, F_grip) - derivatives and forces for constraint checking
+        """
+        grad = np.clip(gradient, -0.2, 0.2) if isinstance(gradient, (int, float)) else gradient
+        v_safe = ca.fmax(v, 5.0)
+
+        # --- Forces ---
+        c_w_a_eff = self._get_effective_drag_coefficient(veh, ers, radius)
+        F_drag = 0.5 * veh.rho_air * v**2 * c_w_a_eff
+        F_roll = veh.mass * veh.g * veh.cr
+        F_grav = veh.mass * veh.g * ca.sin(grad)
+
+        # Propulsion
+        P_net_ers = P_deploy - P_harvest
+        P_ice = throttle * veh.pow_max_ice
+        F_prop = (P_ice + P_net_ers) / v_safe
+
+        # Braking
+        F_brake = brake * veh.max_brake_force
+
+        # Net Force
+        F_net = F_prop - F_brake - F_drag - F_roll - F_grav
+
+        # Grip limit
+        F_norm = veh.mass * veh.g * ca.cos(grad) + 0.5 * veh.rho_air * v**2 * (
+            veh.c_z_a_f + veh.c_z_a_r
+        )
+        F_grip = veh.mu_longitudinal * F_norm
+
+        # State derivatives (spatial domain)
+        dv_ds = F_net / (veh.mass * v_safe)
+        
+        # Battery dynamics
+        P_bat_out = (P_deploy / ers.deployment_efficiency) - (P_harvest * ers.recovery_efficiency)
+        dsoc_ds = -P_bat_out / (ers.battery_capacity * v_safe)
+
+        return dv_ds, dsoc_ds, F_prop, F_brake, F_grip
 
     def _build_and_solve(
         self,
@@ -103,23 +172,27 @@ class SpatialNLPSolver(BaseSolver):
 
         # Track data arrays
         track_data = self.track.track_data
-        gradient_arr = np.resize(track_data.gradient, self.N)
-        
-        radius_arr = np.resize(track_data.radius, self.N)
+        gradient_arr = np.resize(track_data.gradient, self.N + 1)
+        radius_arr = np.resize(track_data.radius, self.N + 1)
 
         # =================================================================
         # DECISION VARIABLES
         # =================================================================
 
-        # States
-        V = opti.variable(self.N + 1)  # Velocity (m/s)
-        SOC = opti.variable(self.N + 1)  # State of Charge (0-1)
+        # States at node points
+        V = opti.variable(self.N + 1)      # Velocity (m/s)
+        SOC = opti.variable(self.N + 1)    # State of Charge (0-1)
 
-        # Controls (split to avoid max() in constraints)
-        P_DEPLOY = opti.variable(self.N)  # ERS discharge power (≥0)
+        # Controls (piecewise constant over intervals)
+        P_DEPLOY = opti.variable(self.N)   # ERS discharge power (≥0)
         P_HARVEST = opti.variable(self.N)  # ERS recovery power (≥0)
-        THROTTLE = opti.variable(self.N)  # Throttle position (0-1)
-        BRAKE = opti.variable(self.N)  # Brake position (0-1)
+        THROTTLE = opti.variable(self.N)   # Throttle position (0-1)
+        BRAKE = opti.variable(self.N)      # Brake position (0-1)
+
+        # For Hermite-Simpson: midpoint states
+        if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
+            V_MID = opti.variable(self.N)      # Velocity at midpoints
+            SOC_MID = opti.variable(self.N)    # SOC at midpoints
 
         # =================================================================
         # OBJECTIVE: Minimize Lap Time
@@ -127,10 +200,18 @@ class SpatialNLPSolver(BaseSolver):
 
         T_lap = 0
         for k in range(self.N):
-            # Trapezoidal integration for time
-            v_avg = 0.5 * (V[k] + V[k + 1])
-            v_safe = ca.fmax(v_avg, 1.0)  # Avoid singularity
-            T_lap += self.ds / v_safe
+            if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
+                # Simpson's rule for integrating 1/v:
+                # T = integral of (1/v) ds ≈ (ds/6) * (1/v_k + 4/v_mid + 1/v_{k+1})
+                v_k_safe = ca.fmax(V[k], 1.0)
+                v_mid_safe = ca.fmax(V_MID[k], 1.0)
+                v_k1_safe = ca.fmax(V[k + 1], 1.0)
+                T_lap += (self.ds / 6.0) * (1.0/v_k_safe + 4.0/v_mid_safe + 1.0/v_k1_safe)
+            else:
+                # Euler and Trapezoidal
+                v_avg = 0.5 * (V[k] + V[k + 1])
+                v_safe = ca.fmax(v_avg, 1.0)
+                T_lap += self.ds / v_safe
 
         opti.minimize(T_lap)
 
@@ -142,12 +223,10 @@ class SpatialNLPSolver(BaseSolver):
         total_recovery = 0
 
         for k in range(self.N):
-            # --- Environment ---
-            grad = np.clip(gradient_arr[k], -0.2, 0.2)
-
-            # --- Vehicle State ---
+            # --- Vehicle State at node k ---
             v_k = V[k]
-            v_safe = ca.fmax(v_k, 5.0)
+            v_safe_k = ca.fmax(v_k, 5.0)
+            grad_k = np.clip(gradient_arr[k], -0.2, 0.2)
 
             # --- 2026 Regulation Logic (Speed Dependent Taper) ---
             self._apply_ers_power_limits(opti, P_DEPLOY[k], v_k, ers)
@@ -157,48 +236,85 @@ class SpatialNLPSolver(BaseSolver):
             opti.subject_to(P_DEPLOY[k] >= 0)
             opti.subject_to(P_HARVEST[k] >= 0)
 
-            # --- Forces ---
-            # Drag (with 2026 active aero adjustment)
-            c_w_a_eff = self._get_effective_drag_coefficient(veh, ers, radius_arr[k])
-            F_drag = 0.5 * veh.rho_air * v_k**2 * c_w_a_eff
-
-            # Resistances
-            F_roll = veh.mass * veh.g * veh.cr
-            F_grav = veh.mass * veh.g * ca.sin(grad)
-
-            # Propulsion
-            P_net_ers = P_DEPLOY[k] - P_HARVEST[k]
-            P_ice = THROTTLE[k] * veh.pow_max_ice
-            F_prop = (P_ice + P_net_ers) / v_safe
-
-            # Braking
-            F_brake = BRAKE[k] * veh.max_brake_force
-
-            # Net Force
-            F_net = F_prop - F_brake - F_drag - F_roll - F_grav
-
-            # --- Grip Limits (Friction Circle) ---
-            F_norm = veh.mass * veh.g * ca.cos(grad) + 0.5 * veh.rho_air * v_k**2 * (
-                veh.c_z_a_f + veh.c_z_a_r
+            # --- Compute derivatives at node k ---
+            dv_ds_k, dsoc_ds_k, F_prop_k, F_brake_k, F_grip_k = self._compute_derivatives(
+                V[k], SOC[k],
+                P_DEPLOY[k], P_HARVEST[k], THROTTLE[k], BRAKE[k],
+                gradient_arr[k], radius_arr[k], veh, ers
             )
-            F_grip = veh.mu_longitudinal * F_norm
 
-            opti.subject_to(F_prop - F_brake <= F_grip)
-            opti.subject_to(F_prop - F_brake >= -F_grip)
+            # --- Grip Limits at node k (Friction Circle) ---
+            opti.subject_to(F_prop_k - F_brake_k <= F_grip_k)
+            opti.subject_to(F_prop_k - F_brake_k >= -F_grip_k)
 
-            # --- Dynamics Integration (Euler) ---
-            dv_ds = F_net / (veh.mass * v_safe)
-            opti.subject_to(V[k + 1] == V[k] + dv_ds * self.ds)
+            # --- Apply collocation constraints ---
+            if self.collocation_method == CollocationMethod.EULER:
+                # Explicit Euler: x[k+1] = x[k] + h * f(x[k])
+                opti.subject_to(V[k + 1] == V[k] + self.ds * dv_ds_k)
+                opti.subject_to(SOC[k + 1] == SOC[k] + self.ds * dsoc_ds_k)
 
-            # --- Battery Dynamics ---
-            P_bat_out = (P_DEPLOY[k] / ers.deployment_efficiency) - (
-                P_HARVEST[k] * ers.recovery_efficiency
-            )
-            dsoc_ds = -P_bat_out / (ers.battery_capacity * v_safe)
-            opti.subject_to(SOC[k + 1] == SOC[k] + dsoc_ds * self.ds)
+            elif self.collocation_method == CollocationMethod.TRAPEZOIDAL:
+                # Compute derivatives at node k+1
+                dv_ds_k1, dsoc_ds_k1, F_prop_k1, F_brake_k1, F_grip_k1 = self._compute_derivatives(
+                    V[k + 1], SOC[k + 1],
+                    P_DEPLOY[k], P_HARVEST[k], THROTTLE[k], BRAKE[k],  # Same control
+                    gradient_arr[k + 1], radius_arr[k + 1], veh, ers
+                )
+                
+                # Grip limits at k+1: only add for the final node (others handled when they become k)
+                if k == self.N - 1:
+                    opti.subject_to(F_prop_k1 - F_brake_k1 <= F_grip_k1)
+                    opti.subject_to(F_prop_k1 - F_brake_k1 >= -F_grip_k1)
+
+                # Trapezoidal: x[k+1] = x[k] + (h/2) * (f(x[k]) + f(x[k+1]))
+                opti.subject_to(V[k + 1] == V[k] + (self.ds / 2.0) * (dv_ds_k + dv_ds_k1))
+                opti.subject_to(SOC[k + 1] == SOC[k] + (self.ds / 2.0) * (dsoc_ds_k + dsoc_ds_k1))
+
+            elif self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
+                # Compute derivatives at node k+1
+                dv_ds_k1, dsoc_ds_k1, F_prop_k1, F_brake_k1, F_grip_k1 = self._compute_derivatives(
+                    V[k + 1], SOC[k + 1],
+                    P_DEPLOY[k], P_HARVEST[k], THROTTLE[k], BRAKE[k],
+                    gradient_arr[k + 1], radius_arr[k + 1], veh, ers
+                )
+                
+                # Grip limits at k+1 (only for final node)
+                if k == self.N - 1:
+                    opti.subject_to(F_prop_k1 - F_brake_k1 <= F_grip_k1)
+                    opti.subject_to(F_prop_k1 - F_brake_k1 >= -F_grip_k1)
+
+                # 1. Midpoint state from Hermite interpolation
+                # x_mid = (x[k] + x[k+1])/2 + (h/8) * (f[k] - f[k+1])
+                v_mid_hermite = 0.5 * (V[k] + V[k + 1]) + (self.ds / 8.0) * (dv_ds_k - dv_ds_k1)
+                soc_mid_hermite = 0.5 * (SOC[k] + SOC[k + 1]) + (self.ds / 8.0) * (dsoc_ds_k - dsoc_ds_k1)
+                
+                opti.subject_to(V_MID[k] == v_mid_hermite)
+                opti.subject_to(SOC_MID[k] == soc_mid_hermite)
+
+                # 2. Compute derivatives at midpoint
+                grad_mid = 0.5 * (gradient_arr[k] + gradient_arr[k + 1])
+                radius_mid = 0.5 * (radius_arr[k] + radius_arr[k + 1])
+                
+                dv_ds_mid, dsoc_ds_mid, F_prop_mid, F_brake_mid, F_grip_mid = self._compute_derivatives(
+                    V_MID[k], SOC_MID[k],
+                    P_DEPLOY[k], P_HARVEST[k], THROTTLE[k], BRAKE[k],
+                    grad_mid, radius_mid, veh, ers
+                )
+
+                # Grip limits at midpoint
+                opti.subject_to(F_prop_mid - F_brake_mid <= F_grip_mid)
+                opti.subject_to(F_prop_mid - F_brake_mid >= -F_grip_mid)
+
+                # 3. Simpson quadrature: x[k+1] = x[k] + (h/6) * (f[k] + 4*f_mid + f[k+1])
+                opti.subject_to(
+                    V[k + 1] == V[k] + (self.ds / 6.0) * (dv_ds_k + 4.0 * dv_ds_mid + dv_ds_k1)
+                )
+                opti.subject_to(
+                    SOC[k + 1] == SOC[k] + (self.ds / 6.0) * (dsoc_ds_k + 4.0 * dsoc_ds_mid + dsoc_ds_k1)
+                )
 
             # --- Energy Accumulation ---
-            dt_step = self.ds / v_safe
+            dt_step = self.ds / v_safe_k
             total_deployment += P_DEPLOY[k] * dt_step
             total_recovery += P_HARVEST[k] * dt_step
 
@@ -212,7 +328,6 @@ class SpatialNLPSolver(BaseSolver):
         # Boundary conditions
         opti.subject_to(SOC[0] == initial_soc)
         opti.subject_to(SOC[-1] >= final_soc_min)
-        # opti.subject_to(V[0] == v_limit_profile[0])
 
         # Global limits
         opti.subject_to(total_deployment <= ers.deployment_limit_per_lap)
@@ -225,11 +340,18 @@ class SpatialNLPSolver(BaseSolver):
         # Control bounds
         opti.subject_to(opti.bounded(0, THROTTLE, 1))
         opti.subject_to(opti.bounded(0, BRAKE, 1))
-        
+
+        # Velocity boundary condition
         if is_flying_lap:
             opti.subject_to(V[0] == V[-1])
         else:
             opti.subject_to(V[0] == v_limit_profile[0])
+
+        # Midpoint bounds for Hermite-Simpson
+        if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
+            v_limit_mid = 0.5 * (v_limit_profile[:-1] + v_limit_profile[1:])
+            opti.subject_to(opti.bounded(5.0, V_MID, v_limit_mid * 1.02))
+            opti.subject_to(opti.bounded(ers.min_soc, SOC_MID, ers.max_soc))
 
         # =================================================================
         # 5. SOLVE
@@ -237,6 +359,13 @@ class SpatialNLPSolver(BaseSolver):
 
         self._configure_solver(opti)
         self._set_initial_guess(opti, V, SOC, P_DEPLOY, THROTTLE, v_limit_profile, initial_soc)
+        
+        # Initial guess for midpoints
+        if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
+            v_mid_guess = 0.5 * (v_limit_profile[:-1] + v_limit_profile[1:]) * 0.95
+            soc_mid_guess = np.linspace(initial_soc, 0.3, self.N)
+            opti.set_initial(V_MID, v_mid_guess)
+            opti.set_initial(SOC_MID, soc_mid_guess)
 
         try:
             sol = opti.solve()
@@ -251,7 +380,8 @@ class SpatialNLPSolver(BaseSolver):
         # =================================================================
 
         return self._extract_trajectory(
-            sol, V, SOC, P_DEPLOY, P_HARVEST, THROTTLE, BRAKE, total_deployment, total_recovery, status
+            sol, V, SOC, P_DEPLOY, P_HARVEST, THROTTLE, BRAKE, 
+            total_deployment, total_recovery, status
         )
 
     def _apply_ers_power_limits(self, opti, P_deploy_k, v_k, ers):

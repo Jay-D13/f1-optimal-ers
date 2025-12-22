@@ -206,10 +206,11 @@ python main.py [OPTIONS]
 | `--initial-soc` | float | `0.5` | Initial battery state of charge (0.0-1.0) |
 | `--final-soc-min` | float | `0.3` | Minimum final SOC constraint (0.0-1.0) |
 | `--regulations` | str | `2025` | Regulation set: `2025` or `2026` |
+| `--collocation` | str | `euler` | Integration method: `euler`, `trapezoidal`, `hermite_simpson` |
 | `--use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
 | `--plot` | flag | `True` | Generate visualization plots |
 | `--save-animation` | flag | `False` | Save animated lap visualization (slow) |
-| `--solver` | str | `nlp` | Solver type (nlp is fully implemented) (others are to come) |
+| `--solver` | str | `nlp` | Solver type (nlp is fully implemented) |
 
 ### Examples
 
@@ -225,6 +226,11 @@ python main.py --track Spa --regulations 2026 --plot --save-animation
 
 # Use TUMFTM raceline instead of FastF1
 python main.py --track Monaco --use-tumftm --plot
+
+# Compare collocation methods (accuracy vs speed tradeoff)
+python main.py --track Monaco --collocation euler --plot           # Fast, 1st order
+python main.py --track Monaco --collocation trapezoidal --plot     # Balanced, 2nd order  
+python main.py --track Monaco --collocation hermite_simpson --plot # Accurate, 4th order
 ```
 
 ---
@@ -502,12 +508,29 @@ Friction circle with load-dependent coefficients:
 ### Solver Configuration
 
 The spatial NLP uses:
-- **Transcription**: Direct collocation (Euler integration -> Gauss-Legendre planned)
-- **NLP Solver**: IPOPT with MA97 or MUMPS linear solver (you need to install HSL separately for MA97)
+- **Transcription**: Direct collocation (selectable order)
+- **NLP Solver**: IPOPT with MA97 or MUMPS linear solver
 - **Discretization**: 5m spatial steps (typically 500-1000 nodes per lap)
 - **Tolerances**: 1×10⁻⁴ (optimal), 1×10⁻³ (acceptable)
 
+#### Collocation Methods
+
+| Method | Order | Formula | Use Case |
+|--------|-------|---------|----------|
+| **Euler** | 1st | `x[k+1] = x[k] + h·f(x[k])` | Fast prototyping, coarse solutions |
+| **Trapezoidal** | 2nd | `x[k+1] = x[k] + (h/2)·(f[k] + f[k+1])` | Good balance of speed/accuracy |
+| **Hermite-Simpson** | 4th | Simpson's rule with Hermite midpoint | High accuracy, publication quality |
+
+The Hermite-Simpson method uses the separated form:
+```
+x_mid = (x[k] + x[k+1])/2 + (h/8)·(f[k] - f[k+1])     # Hermite interpolation
+x[k+1] = x[k] + (h/6)·(f[k] + 4·f_mid + f[k+1])       # Simpson quadrature
+```
+
+**Recommendation**: Use `--collocation trapezoidal` for general use, `--collocation hermite_simpson` for final results or when comparing against real telemetry.
+
 ---
+
 
 ## References
 
