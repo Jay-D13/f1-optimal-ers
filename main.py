@@ -56,7 +56,8 @@ def main(args):
     print(f"\nTrack: {args.track}")
     print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
           f"{ers_config.battery_usable_energy/1e6:.1f}MJ/lap limit")
-    print(f"Vehicle: Cd={vehicle_config.cd}, Cl={vehicle_config.cl}")
+    print(f"Vehicle: Cd={vehicle_config.cd:.2f}, Cl={vehicle_config.cl:.2f}")
+    print(f"Collocation: {args.collocation}")
     
     # =========================================================================
     print("\n" + "="*70)
@@ -120,10 +121,16 @@ def main(args):
 
     # =========================================================================
     print("\n" + "="*70)
-    print("PHASE 2 - ERS OPTIMIZATION (Spatial NLP)")
+    print(f"PHASE 2 - ERS OPTIMIZATION (Spatial NLP - {args.collocation.upper()})")
     print("="*70)
     
-    nlp_solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
+    nlp_solver = SpatialNLPSolver(
+        vehicle_model, 
+        track, 
+        ers_config, 
+        ds=5.0,
+        collocation_method=args.collocation
+    )
     
     # Use the WITH-ERS velocity limit for optimization
     optimal_trajectory = nlp_solver.solve(
@@ -145,6 +152,7 @@ def main(args):
         F1 ERS OPTIMIZATION RESULTS - {args.track.upper()}
         {'='*70}
         Regulations Year:      {args.regulations}
+        Collocation Method:    {args.collocation}
 
         TRACK INFORMATION:
         Track:                 {args.track}
@@ -163,7 +171,7 @@ def main(args):
         SOLVER INFORMATION:
         Status:                 {optimal_trajectory.solver_status}
         Solve Time:             {optimal_trajectory.solve_time:.2f} s
-        Solver Type:            {args.solver}
+        Solver Type:            {optimal_trajectory.solver_name}
 
         ENERGY MANAGEMENT:
         Initial SOC:            {energy_stats['initial_soc']*100:.1f}%
@@ -224,7 +232,7 @@ def main(args):
         print("\n Offline Solution...")
         fig_offline = plot_offline_solution(
             optimal_trajectory,
-            title=f"{args.track} - Offline Optimal Solution"
+            title=f"{args.track} - Offline Optimal Solution ({args.collocation})"
         )
         run_manager.save_plot(fig_offline, '02_offline_solution')
         plt.close(fig_offline)
@@ -296,12 +304,20 @@ if __name__ == "__main__":
         description='F1 ERS Optimal Control',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-            Examples:
-            python main.py --track Monaco --plot
-            python main.py --track Monza --initial-soc 0.6 --plot --save-animation
-            python main.py --track Spa --year 2023 --driver VER --plot
-            
-            python main.py --track Monaco --solver nlp --plot --save-animation
+        Examples:
+        python main.py --track Monaco --plot
+        python main.py --track Monza --initial-soc 0.6 --plot --save-animation
+        python main.py --track Spa --year 2023 --driver VER --plot
+        
+        # Compare collocation methods:
+        python main.py --track Monaco --collocation euler --plot
+        python main.py --track Monaco --collocation trapezoidal --plot
+        python main.py --track Monaco --collocation hermite_simpson --plot
+
+        Collocation Methods:
+        euler            - 1st order explicit Euler (fastest, least accurate)
+        trapezoidal      - 2nd order implicit trapezoidal (good balance)
+        hermite_simpson  - 4th order Hermite-Simpson (most accurate, slower)
         """
     )
     
@@ -322,8 +338,11 @@ if __name__ == "__main__":
     parser.add_argument('--save-animation', action='store_true',
                         help='Save lap animation (slow, optional)')
     parser.add_argument('--solver', type=str, default='nlp',
-                        choices=['nlp', 'ecms', 'pmp', 'mpcc'],
+                        choices=['nlp'],
                         help='Solver to use (nlp is fully implemented)')
+    parser.add_argument('--collocation', type=str, default='euler',
+                        choices=['euler', 'trapezoidal', 'hermite_simpson'],
+                        help='Collocation method: euler (1st order), trapezoidal (2nd order), hermite_simpson (4th order)')
     parser.add_argument('--regulations', type=str, default='2025',
                         choices=['2025', '2026'],
                         help='Choose "2025" for the V6 Turbo Hybrid era rules (2014-2025) or "2026" for new upcoming engine specs')
