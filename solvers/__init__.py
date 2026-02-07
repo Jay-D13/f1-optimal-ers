@@ -12,6 +12,9 @@ from .forward_backward import (
 from .spatial_nlp import (
     SpatialNLPSolver,
 )
+from .multi_lap_nlp import (
+    MultiLapSpatialNLPSolver,
+)
 
 # from .lap_time_map import (
 #     LapTimeMapGenerator,
@@ -31,6 +34,7 @@ __all__ = [
     
     # Offline optimization
     'SpatialNLPSolver',
+    'MultiLapSpatialNLPSolver',
     
     # Race strategy
     # 'LapTimeMapGenerator',

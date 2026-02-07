@@ -138,6 +138,25 @@ uv run python main.py --track Monza --regulations 2025 --plot
 uv run python main.py --track Monza --regulations 2026 --plot
 ```
 
+### Run multi-lap NLP race strategy
+
+```bash
+# 10-lap horizon with final and per-lap SOC constraints
+uv run python main.py --track Monza --laps 10 --final-soc-min 0.45 --per-lap-final-soc-min 0.40
+```
+
+### Apple Silicon Note (M5 tested)
+
+- Multi-lap NLP runs on Apple Silicon are supported, but can be much slower than high-end desktop x86 CPUs.
+- On an M5 test machine, large multi-lap problems (especially with `--ds 5`) were also more crash-prone with Ipopt.
+- Use `--nlp-solver auto` (default) so Apple Silicon prefers `fatrop`.
+- If needed, reduce horizon size first (`--laps`) before increasing `--ds`.
+
+```bash
+# Recommended starting point on Apple Silicon
+uv run python main.py --track Monza --ds 5 --laps 2 --nlp-solver auto
+```
+
 On first run, FastF1 will download session telemetry data to `data/cache/`. This may take a few minutes.
 
 ---
@@ -200,21 +219,39 @@ python main.py [OPTIONS]
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
+| `--config` | path | `None` | Load defaults from a JSON/TOML config file |
+| `--preset` | str | `None` | Apply a preset bundle (use `--list-presets`) |
+| `--list-presets` | flag | `False` | List available presets and exit |
 | `--track` | str | `Monaco` | Track name (Monaco, Monza, Spa, Montreal, Silverstone) |
 | `--year` | int | `2024` | Season year for FastF1 telemetry data |
 | `--driver` | str | `None` | Driver code (VER, HAM, LEC, etc.) - uses fastest if not specified |
 | `--initial-soc` | float | `0.5` | Initial battery state of charge (0.0-1.0) |
 | `--final-soc-min` | float | `0.3` | Minimum final SOC constraint (0.0-1.0) |
+| `--ds` | float | `5.0` | Spatial discretization step in meters |
+| `--laps` | int | `1` | Number of consecutive laps in the NLP horizon |
+| `--per-lap-final-soc-min` | float | `None` | Optional SOC floor at each lap boundary |
 | `--regulations` | str | `2025` | Regulation set: `2025` or `2026` |
 | `--collocation` | str | `euler` | Integration method: `euler`, `trapezoidal`, `hermite_simpson` |
+| `--nlp-solver` | str | `auto` | NLP backend: `auto`, `ipopt`, `fatrop`, or `sqpmethod` |
+| `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |
+| `--ipopt-hessian` | str | `limited-memory` | Ipopt Hessian mode: `limited-memory` or `exact` |
 | `--use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
-| `--plot` | flag | `True` | Generate visualization plots |
-| `--save-animation` | flag | `False` | Save animated lap visualization (slow) |
+| `--plot/--no-plot` | flag | `True` | Enable or disable visualization plots |
+| `--save-animation/--no-save-animation` | flag | `False` | Enable or disable animated lap visualization |
 | `--solver` | str | `nlp` | Solver type (nlp is fully implemented) |
 
 ### Examples
 
 ```bash
+# List presets
+python main.py --list-presets
+
+# Use a preset + override a couple values
+python main.py --preset quick --track Monaco --year 2024
+
+# Load settings from a config file
+python main.py --config configs/example.toml
+
 # Monaco with specific driver
 python main.py --track Monaco --driver LEC --plot
 
@@ -224,6 +261,12 @@ python main.py --track Montreal --initial-soc 0.6 --final-soc-min 0.4 --plot
 # Spa with 2026 regulations
 python main.py --track Spa --regulations 2026 --plot --save-animation
 
+# Multi-lap stint optimization (race strategy)
+python main.py --track Monza --laps 12 --initial-soc 0.55 --final-soc-min 0.45 --per-lap-final-soc-min 0.35
+
+# Auto backend mode (fatrop on Apple Silicon, ipopt otherwise)
+python main.py --track Monza --ds 5 --laps 10 --nlp-solver auto
+
 # Use TUMFTM raceline instead of FastF1
 python main.py --track Monaco --use-tumftm --plot
 
@@ -231,6 +274,27 @@ python main.py --track Monaco --use-tumftm --plot
 python main.py --track Monaco --collocation euler --plot           # Fast, 1st order
 python main.py --track Monaco --collocation trapezoidal --plot     # Balanced, 2nd order  
 python main.py --track Monaco --collocation hermite_simpson --plot # Accurate, 4th order
+```
+
+### Preset + Config Precedence
+
+Resolution order is:
+
+1. Built-in defaults
+2. Preset (`--preset`)
+3. Config file (`--config`)
+4. Explicit CLI flags (highest priority)
+
+### Config File Format
+
+Use JSON or TOML with keys that match CLI flag names (without the `--`). You can also wrap the values under an `args` key.
+
+```toml
+track = "Monza"
+year = 2024
+initial_soc = 0.55
+final_soc_min = 0.45
+collocation = "trapezoidal"
 ```
 
 ---

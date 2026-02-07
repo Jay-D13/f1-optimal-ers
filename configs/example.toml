@@ -1,0 +1,20 @@
+# Example configuration for main.py
+# Values correspond to CLI flags (without leading --)
+
+track = "Monza"
+year = 2024
+driver = "VER"
+initial_soc = 0.55
+final_soc_min = 0.45
+ds = 5.0
+laps = 10
+per_lap_final_soc_min = 0.40
+use_tumftm = false
+plot = true
+save_animation = false
+solver = "nlp"
+collocation = "trapezoidal"
+nlp_solver = "auto"
+ipopt_linear_solver = "mumps"
+ipopt_hessian = "limited-memory"
+regulations = "2025"

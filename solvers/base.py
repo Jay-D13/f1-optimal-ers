@@ -1,7 +1,7 @@
 import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 @dataclass
 class OptimalTrajectory:   
@@ -30,12 +30,29 @@ class OptimalTrajectory:
     solver_status: str         # 'optimal', 'suboptimal', 'failed'
     solver_name: str           # Name of solver used
     
+    # Optional multi-lap metadata
+    n_laps: int = 1
+    lap_length: Optional[float] = None
+    lap_times: Optional[np.ndarray] = None
+    lap_energy_deployed: Optional[np.ndarray] = None
+    lap_energy_recovered: Optional[np.ndarray] = None
+    lap_start_soc: Optional[np.ndarray] = None
+    lap_end_soc: Optional[np.ndarray] = None
+
     def get_reference_at_distance(self, distance: float) -> Dict:
         """reference values at given distance (with lap wrapping)."""
-        distance = distance % self.s[-1]
-        idx = np.searchsorted(self.s, distance)
-        idx = min(idx, self.n_points - 2)
-        
+        lap_length = self.lap_length if self.lap_length is not None else self.s[-1]
+        distance = distance % lap_length
+
+        if self.n_laps > 1:
+            points_per_lap = (self.n_points - 1) // self.n_laps
+            s_ref = self.s[: points_per_lap + 1]
+            idx = np.searchsorted(s_ref, distance)
+            idx = min(idx, points_per_lap - 1)
+        else:
+            idx = np.searchsorted(self.s, distance)
+            idx = min(idx, self.n_points - 2)
+
         return {
             'v_ref': self.v_opt[idx],
             'soc_ref': self.soc_opt[idx],
@@ -46,7 +63,7 @@ class OptimalTrajectory:
     
     def compute_energy_stats(self) -> Dict:
         """detailed energy statistics"""
-        return {
+        stats = {
             'total_deployed_MJ': self.energy_deployed / 1e6,
             'total_recovered_MJ': self.energy_recovered / 1e6,
             'net_energy_MJ': (self.energy_deployed - self.energy_recovered) / 1e6,
@@ -54,6 +71,19 @@ class OptimalTrajectory:
             'final_soc': self.soc_opt[-1],
             'soc_swing': self.soc_opt.max() - self.soc_opt.min(),
         }
+
+        if self.lap_times is not None:
+            stats['lap_times_s'] = self.lap_times
+        if self.lap_energy_deployed is not None:
+            stats['lap_deployed_MJ'] = self.lap_energy_deployed / 1e6
+        if self.lap_energy_recovered is not None:
+            stats['lap_recovered_MJ'] = self.lap_energy_recovered / 1e6
+        if self.lap_start_soc is not None:
+            stats['lap_start_soc'] = self.lap_start_soc
+        if self.lap_end_soc is not None:
+            stats['lap_end_soc'] = self.lap_end_soc
+
+        return stats
 
 class BaseSolver(ABC):
 
