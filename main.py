@@ -1,17 +1,19 @@
-import argparse
 import sys
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from solvers import (
     ForwardBackwardSolver,
     SpatialNLPSolver,
+    MultiLapSpatialNLPSolver,
 )
 from models import F1TrackModel, VehicleDynamicsModel
 from config import ERSConfig, VehicleConfig, get_vehicle_config, get_ers_config
+from config.app_config import AppConfig, build_parser
 from utils import RunManager, export_results
 from visualization import (
     visualize_track,
@@ -22,9 +24,31 @@ from visualization import (
 )
 
 
+def _format_multi_lap_breakdown(trajectory) -> str:
+    """Format per-lap metrics for text summary."""
+    if trajectory.lap_times is None:
+        return ""
+
+    lines = ["        PER-LAP BREAKDOWN:"]
+    for i, lap_time in enumerate(trajectory.lap_times):
+        deployed = trajectory.lap_energy_deployed[i] / 1e6
+        recovered = trajectory.lap_energy_recovered[i] / 1e6
+        soc_start = trajectory.lap_start_soc[i] * 100
+        soc_end = trajectory.lap_end_soc[i] * 100
+        lines.append(
+            f"        Lap {i + 1:<2}: {lap_time:>7.3f} s | SOC {soc_start:>5.1f}% -> "
+            f"{soc_end:>5.1f}% | Deploy {deployed:>5.3f} MJ | Recover {recovered:>5.3f} MJ"
+        )
+
+    return "\n".join(lines)
+
+
 def main(args):
     """Main execution function."""
     
+    if args.laps < 1:
+        raise ValueError("--laps must be >= 1")
+
     print("="*70)
     print("  F1 ERS OPTIMAL CONTROL")
     print("="*70)
@@ -58,13 +82,23 @@ def main(args):
           f"{ers_config.battery_usable_energy/1e6:.1f}MJ/lap limit")
     print(f"Vehicle: Cd={vehicle_config.cd:.2f}, Cl={vehicle_config.cl:.2f}")
     print(f"Collocation: {args.collocation}")
+    print(f"Spatial step ds: {args.ds} m")
+    print(f"Laps in NLP horizon: {args.laps}")
+    print(f"NLP Backend: {args.nlp_solver}")
+    if args.nlp_solver == "auto":
+        print("NLP Backend Auto: fatrop on Apple Silicon, ipopt otherwise")
+    if args.nlp_solver == "ipopt":
+        print(f"Ipopt linear solver: {args.ipopt_linear_solver}")
+        print(f"Ipopt Hessian: {args.ipopt_hessian}")
+    if args.per_lap_final_soc_min is not None:
+        print(f"Per-lap SOC floor: {args.per_lap_final_soc_min:.2f}")
     
     # =========================================================================
     print("\n" + "="*70)
     print("LOAD TRACK")
     print("="*70)
     
-    track = F1TrackModel(year=args.year, gp=args.track, ds=5.0)
+    track = F1TrackModel(year=args.year, gp=args.track, ds=args.ds)
     driver = args.driver #if args.driver else 'VER' # DU DU DU DUUU MAX VERSTAPPEN
     
     # Try TUMFTM raceline first, fallback to FastF1
@@ -123,22 +157,43 @@ def main(args):
     print("\n" + "="*70)
     print(f"PHASE 2 - ERS OPTIMIZATION (Spatial NLP - {args.collocation.upper()})")
     print("="*70)
-    
-    nlp_solver = SpatialNLPSolver(
-        vehicle_model, 
-        track, 
-        ers_config, 
-        ds=5.0,
-        collocation_method=args.collocation
-    )
-    
-    # Use the WITH-ERS velocity limit for optimization
-    optimal_trajectory = nlp_solver.solve(
-        v_limit_profile=velocity_profile_with_ers.v,
-        initial_soc=args.initial_soc,
-        final_soc_min=args.final_soc_min,
-        is_flying_lap=USE_FLYING_LAP
-    )
+
+    if args.laps <= 1:
+        nlp_solver = SpatialNLPSolver(
+            vehicle_model,
+            track,
+            ers_config,
+            ds=args.ds,
+            collocation_method=args.collocation,
+            nlp_solver=args.nlp_solver,
+            ipopt_linear_solver=args.ipopt_linear_solver,
+            ipopt_hessian_approximation=args.ipopt_hessian,
+        )
+        optimal_trajectory = nlp_solver.solve(
+            v_limit_profile=velocity_profile_with_ers.v,
+            initial_soc=args.initial_soc,
+            final_soc_min=args.final_soc_min,
+            is_flying_lap=USE_FLYING_LAP,
+        )
+    else:
+        nlp_solver = MultiLapSpatialNLPSolver(
+            vehicle_model,
+            track,
+            ers_config,
+            ds=args.ds,
+            collocation_method=args.collocation,
+            nlp_solver=args.nlp_solver,
+            ipopt_linear_solver=args.ipopt_linear_solver,
+            ipopt_hessian_approximation=args.ipopt_hessian,
+        )
+        optimal_trajectory = nlp_solver.solve(
+            v_limit_profile=velocity_profile_with_ers.v,
+            n_laps=args.laps,
+            initial_soc=args.initial_soc,
+            final_soc_min=args.final_soc_min,
+            is_flying_lap=USE_FLYING_LAP,
+            per_lap_final_soc_min=args.per_lap_final_soc_min,
+        )
     
     # =========================================================================
     print("\n" + "="*70)
@@ -146,6 +201,13 @@ def main(args):
     print("="*70)
     
     energy_stats = optimal_trajectory.compute_energy_stats()
+    n_laps = max(1, int(getattr(optimal_trajectory, "n_laps", 1)))
+    total_time_no_ers = velocity_profile_no_ers.lap_time * n_laps
+    total_time_with_ers = velocity_profile_with_ers.lap_time * n_laps
+    total_time_optimal = optimal_trajectory.lap_time
+    improvement = total_time_no_ers - total_time_optimal
+    improvement_pct = (improvement / total_time_no_ers * 100.0) if total_time_no_ers > 1e-9 else 0.0
+    lap_breakdown = _format_multi_lap_breakdown(optimal_trajectory)
     
     summary_text = f"""
         {'='*70}
@@ -153,6 +215,7 @@ def main(args):
         {'='*70}
         Regulations Year:      {args.regulations}
         Collocation Method:    {args.collocation}
+        NLP Horizon Laps:      {n_laps}
 
         TRACK INFORMATION:
         Track:                 {args.track}
@@ -161,12 +224,13 @@ def main(args):
         Number of Segments:    {len(track.segments)}
 
         LAP TIME PERFORMANCE:
-        Lap Time (No ERS):      {velocity_profile_no_ers.lap_time:.3f} s
-        Lap Time (With ERS):    {velocity_profile_with_ers.lap_time:.3f} s
-        Lap Time (Optimal):     {optimal_trajectory.lap_time:.3f} s
+        Total Time (No ERS):    {total_time_no_ers:.3f} s
+        Total Time (With ERS):  {total_time_with_ers:.3f} s
+        Total Time (Optimal):   {total_time_optimal:.3f} s
+        Avg Lap (Optimal):      {total_time_optimal / n_laps:.3f} s
         
-        Improvement vs No ERS:  {velocity_profile_no_ers.lap_time - optimal_trajectory.lap_time:.3f} s ({((velocity_profile_no_ers.lap_time - optimal_trajectory.lap_time) / velocity_profile_no_ers.lap_time * 100):.2f}%)
-        Gap to Theoretical:     {optimal_trajectory.lap_time - velocity_profile_with_ers.lap_time:.3f} s
+        Improvement vs No ERS:  {improvement:.3f} s ({improvement_pct:.2f}%)
+        Gap to Theoretical:     {total_time_optimal - total_time_with_ers:.3f} s
 
         SOLVER INFORMATION:
         Status:                 {optimal_trajectory.solver_status}
@@ -186,6 +250,7 @@ def main(args):
         With ERS Profile:       {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
         Optimal Strategy:       {optimal_trajectory.v_opt.min()*3.6:.0f} - {optimal_trajectory.v_opt.max()*3.6:.0f} km/h (avg: {optimal_trajectory.v_opt.mean()*3.6:.0f} km/h)
 
+{lap_breakdown if lap_breakdown else ""}
         {'='*70}
     """
     
@@ -211,6 +276,12 @@ def main(args):
     run_manager.save_numpy(optimal_trajectory.P_ers_opt, 'ers_power')
     run_manager.save_numpy(optimal_trajectory.throttle_opt, 'throttle')
     run_manager.save_numpy(optimal_trajectory.brake_opt, 'brake')
+    if optimal_trajectory.lap_times is not None:
+        run_manager.save_numpy(optimal_trajectory.lap_times, 'lap_times')
+        run_manager.save_numpy(optimal_trajectory.lap_start_soc, 'lap_start_soc')
+        run_manager.save_numpy(optimal_trajectory.lap_end_soc, 'lap_end_soc')
+        run_manager.save_numpy(optimal_trajectory.lap_energy_deployed, 'lap_energy_deployed')
+        run_manager.save_numpy(optimal_trajectory.lap_energy_recovered, 'lap_energy_recovered')
     
     # =========================================================================
     if args.plot:
@@ -225,69 +296,73 @@ def main(args):
             track_name=args.track,
             driver_name=driver
         )
-        run_manager.save_plot(fig_track, '01_track_analysis')
-        plt.close(fig_track)
+        if fig_track is not None:
+            run_manager.save_plot(fig_track, '01_track_analysis')
+            plt.close(fig_track)
         
         # Offline solution (reusing existing function)
         print("\n Offline Solution...")
         fig_offline = plot_offline_solution(
             optimal_trajectory,
-            title=f"{args.track} - Offline Optimal Solution ({args.collocation})"
+            title=f"{args.track} - Offline Optimal Solution ({args.collocation}, {n_laps} lap(s))"
         )
         run_manager.save_plot(fig_offline, '02_offline_solution')
         plt.close(fig_offline)
-        
-        # Comprehensive comparison (with/without ERS)
-        print("\n ERS Comparison Analysis...")
-        fig_comparison = create_comparison_plot(
-            track,
-            velocity_profile_no_ers.v,
-            velocity_profile_with_ers.v,
-            optimal_trajectory,
-            args.track
-        )
-        run_manager.save_plot(fig_comparison, '03_ers_comparison')
-        plt.close(fig_comparison)
-        
-        # Simple results plot
-        print("\n Simple Results...")
-        fig_simple = plot_simple_results(
-            optimal_trajectory, 
-            velocity_profile_no_ers, 
-            track, 
-            args.track
-        )
-        run_manager.save_plot(fig_simple, '04_simple_results')
-        plt.close(fig_simple)
-        
-        # Animation (optional, can be slow)
-        if args.save_animation:
-            print("\n Creating Animation (this may take a while)...")
-            results_dict_for_anim = {
-                'times': optimal_trajectory.t_opt,
-                'states': np.column_stack([
-                    optimal_trajectory.s,
-                    optimal_trajectory.v_opt,
-                    optimal_trajectory.soc_opt
-                ]),
-                'controls': np.column_stack([
-                    optimal_trajectory.P_ers_opt,
-                    optimal_trajectory.throttle_opt,
-                    optimal_trajectory.brake_opt
-                ]),
-                'lap_time': optimal_trajectory.lap_time,
-                'completed': True
-            }
-            
-            animation_path = run_manager.plots_dir / "05_lap_animation.gif"
-            fig_anim, anim = visualize_lap_animated( # TODO fix speed slow down and speed up of ego car
+
+        if n_laps == 1:
+            # Comprehensive comparison (with/without ERS)
+            print("\n ERS Comparison Analysis...")
+            fig_comparison = create_comparison_plot(
                 track,
-                results_dict_for_anim,
-                strategy_name="Optimal ERS",
-                save_path=str(animation_path)
+                velocity_profile_no_ers.v,
+                velocity_profile_with_ers.v,
+                optimal_trajectory,
+                args.track
             )
-            print(f"   ✓ Saved 05_lap_animation.gif")
-            plt.close(fig_anim)
+            run_manager.save_plot(fig_comparison, '03_ers_comparison')
+            plt.close(fig_comparison)
+
+            # Simple results plot
+            print("\n Simple Results...")
+            fig_simple = plot_simple_results(
+                optimal_trajectory,
+                velocity_profile_no_ers,
+                track,
+                args.track
+            )
+            run_manager.save_plot(fig_simple, '04_simple_results')
+            plt.close(fig_simple)
+
+            # Animation (optional, can be slow)
+            if args.save_animation:
+                print("\n Creating Animation (this may take a while)...")
+                results_dict_for_anim = {
+                    'times': optimal_trajectory.t_opt,
+                    'states': np.column_stack([
+                        optimal_trajectory.s,
+                        optimal_trajectory.v_opt,
+                        optimal_trajectory.soc_opt
+                    ]),
+                    'controls': np.column_stack([
+                        optimal_trajectory.P_ers_opt,
+                        optimal_trajectory.throttle_opt,
+                        optimal_trajectory.brake_opt
+                    ]),
+                    'lap_time': optimal_trajectory.lap_time,
+                    'completed': True
+                }
+
+                animation_path = run_manager.plots_dir / "05_lap_animation.gif"
+                fig_anim, anim = visualize_lap_animated( # TODO fix speed slow down and speed up of ego car
+                    track,
+                    results_dict_for_anim,
+                    strategy_name="Optimal ERS",
+                    save_path=str(animation_path)
+                )
+                print(f"   ✓ Saved 05_lap_animation.gif")
+                plt.close(fig_anim)
+        else:
+            print("\n Multi-lap run detected: skipping single-lap comparison and animation plots.")
         
         print("\n✓ All plots saved!")
     
@@ -300,53 +375,10 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='F1 ERS Optimal Control',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-        Examples:
-        python main.py --track Monaco --plot
-        python main.py --track Monza --initial-soc 0.6 --plot --save-animation
-        python main.py --track Spa --year 2023 --driver VER --plot
-        
-        # Compare collocation methods:
-        python main.py --track Monaco --collocation euler --plot
-        python main.py --track Monaco --collocation trapezoidal --plot
-        python main.py --track Monaco --collocation hermite_simpson --plot
+    parser = build_parser()
+    namespace = parser.parse_args()
+    args_dict = vars(namespace)
+    args_dict.pop("config", None)
+    args = AppConfig(**args_dict)
 
-        Collocation Methods:
-        euler            - 1st order explicit Euler (fastest, least accurate)
-        trapezoidal      - 2nd order implicit trapezoidal (good balance)
-        hermite_simpson  - 4th order Hermite-Simpson (most accurate, slower)
-        """
-    )
-    
-    parser.add_argument('--track', type=str, default='Monaco',
-                        help='Track name (e.g., Monaco, Monza, Spa)')
-    parser.add_argument('--year', type=int, default=2024,
-                        help='Season year for FastF1 data')
-    parser.add_argument('--driver', type=str, default=None,
-                        help='Driver code for FastF1 (e.g., VER, HAM)')
-    parser.add_argument('--initial-soc', type=float, default=0.5,
-                        help='Initial battery SOC (0.0-1.0)')
-    parser.add_argument('--final-soc-min', type=float, default=0.3,
-                        help='Minimum final SOC (0.0-1.0)')
-    parser.add_argument('--use-tumftm', action='store_true',
-                        help='Prefer TUMFTM raceline if available')
-    parser.add_argument('--plot', action='store_true', default=True,
-                        help='Generate plots')
-    parser.add_argument('--save-animation', action='store_true',
-                        help='Save lap animation (slow, optional)')
-    parser.add_argument('--solver', type=str, default='nlp',
-                        choices=['nlp'],
-                        help='Solver to use (nlp is fully implemented)')
-    parser.add_argument('--collocation', type=str, default='euler',
-                        choices=['euler', 'trapezoidal', 'hermite_simpson'],
-                        help='Collocation method: euler (1st order), trapezoidal (2nd order), hermite_simpson (4th order)')
-    parser.add_argument('--regulations', type=str, default='2025',
-                        choices=['2025', '2026'],
-                        help='Choose "2025" for the V6 Turbo Hybrid era rules (2014-2025) or "2026" for new upcoming engine specs')
-    
-    args = parser.parse_args()
-    
     optimal_trajectory, run_manager = main(args)

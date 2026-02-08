@@ -80,6 +80,8 @@ def export_results(optimal_trajectory: OptimalTrajectory,
                                 args) -> Dict:
 
     energy_stats = optimal_trajectory.compute_energy_stats()
+    n_laps = max(1, int(getattr(optimal_trajectory, "n_laps", 1)))
+    baseline_total = float(velocity_profile.lap_time) * n_laps
     
     results = {
         'metadata': {
@@ -88,8 +90,14 @@ def export_results(optimal_trajectory: OptimalTrajectory,
             'driver': args.driver,
             'timestamp': datetime.now().isoformat(),
             'solver': args.solver,
+            'nlp_solver': getattr(args, 'nlp_solver', None),
+            'ipopt_linear_solver': getattr(args, 'ipopt_linear_solver', None),
+            'ipopt_hessian': getattr(args, 'ipopt_hessian', None),
             'initial_soc': args.initial_soc,
             'final_soc_min': args.final_soc_min,
+            'n_laps': n_laps,
+            'per_lap_final_soc_min': getattr(args, 'per_lap_final_soc_min', None),
+            'ds': getattr(args, 'ds', None),
         },
         'track_info': {
             'total_length': float(track.total_length),
@@ -98,10 +106,15 @@ def export_results(optimal_trajectory: OptimalTrajectory,
         },
         'performance': {
             'lap_time': float(optimal_trajectory.lap_time),
-            'lap_time_no_ers': float(velocity_profile.lap_time),
-            'time_improvement': float(velocity_profile.lap_time - optimal_trajectory.lap_time),
+            'lap_time_no_ers': baseline_total,
+            'time_improvement': float(baseline_total - optimal_trajectory.lap_time),
             'solver_status': optimal_trajectory.solver_status,
             'solve_time': float(optimal_trajectory.solve_time),
+            'lap_times': (
+                optimal_trajectory.lap_times
+                if optimal_trajectory.lap_times is not None
+                else np.array([optimal_trajectory.lap_time])
+            ),
         },
         'energy': {
             'initial_soc': float(energy_stats['initial_soc']),
@@ -111,6 +124,10 @@ def export_results(optimal_trajectory: OptimalTrajectory,
             'net_energy_MJ': float(energy_stats['net_energy_MJ']),
             'energy_efficiency': float(energy_stats['total_recovered_MJ'] / 
                                       max(energy_stats['total_deployed_MJ'], 1e-6)),
+            'lap_deployed_MJ': energy_stats.get('lap_deployed_MJ'),
+            'lap_recovered_MJ': energy_stats.get('lap_recovered_MJ'),
+            'lap_start_soc': energy_stats.get('lap_start_soc'),
+            'lap_end_soc': energy_stats.get('lap_end_soc'),
         },
         'velocity_stats': {
             'max_speed_kmh': float(optimal_trajectory.v_opt.max() * 3.6),

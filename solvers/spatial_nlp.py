@@ -18,6 +18,7 @@ Problem Formulation:
         SOC_min ≤ SOC ≤ SOC_max               (battery limits)
 """
 
+import platform
 import time
 from enum import Enum
 from typing import Literal, Tuple
@@ -47,12 +48,19 @@ class SpatialNLPSolver(BaseSolver):
         track_model, 
         ers_config, 
         ds: float = 5.0,
-        collocation_method: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
+        collocation_method: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler",
+        nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto",
+        ipopt_linear_solver: str = "mumps",
+        ipopt_hessian_approximation: Literal["limited-memory", "exact"] = "limited-memory",
     ):
         super().__init__(vehicle_model, track_model, ers_config)
         self.ds = ds
 
         self.collocation_method = CollocationMethod(collocation_method)
+        self.nlp_solver = nlp_solver
+        self.ipopt_linear_solver = ipopt_linear_solver
+        self.ipopt_hessian_approximation = ipopt_hessian_approximation
+        self._resolved_nlp_solver = self._resolve_nlp_solver()
 
         # Discretization
         self.N = int(track_model.total_length / ds)
@@ -61,6 +69,14 @@ class SpatialNLPSolver(BaseSolver):
     @property
     def name(self) -> str:
         return "SpatialNLP"
+
+    def _resolve_nlp_solver(self) -> Literal["ipopt", "fatrop", "sqpmethod"]:
+        """Resolve auto solver mode to a concrete backend."""
+        if self.nlp_solver == "auto":
+            if platform.system() == "Darwin" and platform.machine() == "arm64":
+                return "fatrop"
+            return "ipopt"
+        return self.nlp_solver
 
     def solve(
         self,
@@ -82,6 +98,20 @@ class SpatialNLPSolver(BaseSolver):
             OptimalTrajectory containing solution
         """
         self._log(f"Setting up NLP with {self.N} nodes using {self.collocation_method.value} collocation..")
+
+        if self.nlp_solver == "auto":
+            self._log(f"Auto-selected NLP backend: {self._resolved_nlp_solver}")
+
+        if (
+            self._resolved_nlp_solver == "ipopt"
+            and platform.system() == "Darwin"
+            and platform.machine() == "arm64"
+            and self.N >= 1000
+        ):
+            self._log(
+                "⚠ Apple Silicon + Ipopt(MUMPS) can segfault on large NLPs. "
+                "Try nlp_solver='fatrop' if this crashes."
+            )
         start_time = time.time()
 
         # Ensure v_limit is the right size
@@ -422,22 +452,40 @@ class SpatialNLPSolver(BaseSolver):
         return c_w_a
 
     def _configure_solver(self, opti):
-        """Configure IPOPT solver with appropriate options."""
-        opts = {
-            "ipopt.max_iter": 3000,
-            "ipopt.print_level": 4,
-            "ipopt.tol": 1e-4,
-            "ipopt.acceptable_tol": 1e-3,
-            "ipopt.linear_solver": "mumps", # ma97
-            "ipopt.nlp_scaling_method": "gradient-based",
-        }
+        """Configure NLP solver backend with appropriate options."""
+        backend = self._resolved_nlp_solver
 
-        try:
+        if backend == "fatrop":
+            try:
+                opti.solver("fatrop")
+                return
+            except Exception:
+                if self.nlp_solver != "auto":
+                    raise
+                self._log("⚠ fatrop unavailable, falling back to ipopt")
+                backend = "ipopt"
+                self._resolved_nlp_solver = backend
+
+        if backend == "sqpmethod":
+            opti.solver("sqpmethod", {"qpsol": "qpoases"})
+            return
+
+        if backend == "ipopt":
+            opts = {
+                "ipopt.max_iter": 3000,
+                "ipopt.print_level": 4,
+                "ipopt.tol": 1e-4,
+                "ipopt.acceptable_tol": 1e-3,
+                "ipopt.linear_solver": self.ipopt_linear_solver,
+                "ipopt.nlp_scaling_method": "gradient-based",
+            }
+            if self.ipopt_hessian_approximation == "limited-memory":
+                opts["ipopt.hessian_approximation"] = "limited-memory"
+
             opti.solver("ipopt", opts)
-        except Exception:
-            print("⚠ MA97 not found, falling back to MUMPS")
-            opts["ipopt.linear_solver"] = "mumps"
-            opti.solver("ipopt", opts)
+            return
+
+        raise ValueError(f"Unknown NLP solver backend: {backend}")
 
     def _set_initial_guess(self, opti, V, SOC, P_DEPLOY, THROTTLE, v_limit_profile, initial_soc):
         """Set initial guess for optimization variables."""
@@ -488,5 +536,5 @@ class SpatialNLPSolver(BaseSolver):
             energy_recovered=sol.value(total_recovery),
             solve_time=0.0,
             solver_status=status,
-            solver_name=self.name,
+            solver_name=f"{self.name}({self._resolved_nlp_solver})",
         )
