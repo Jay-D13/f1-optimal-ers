@@ -219,9 +219,7 @@ python main.py [OPTIONS]
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--config` | path | `None` | Load defaults from a JSON/TOML config file |
-| `--preset` | str | `None` | Apply a preset bundle (use `--list-presets`) |
-| `--list-presets` | flag | `False` | List available presets and exit |
+| `--config` | path | `None` | Load defaults from a JSON/YAML config file |
 | `--track` | str | `Monaco` | Track name (Monaco, Monza, Spa, Montreal, Silverstone) |
 | `--year` | int | `2024` | Season year for FastF1 telemetry data |
 | `--driver` | str | `None` | Driver code (VER, HAM, LEC, etc.) - uses fastest if not specified |
@@ -243,14 +241,11 @@ python main.py [OPTIONS]
 ### Examples
 
 ```bash
-# List presets
-python main.py --list-presets
-
-# Use a preset + override a couple values
-python main.py --preset quick --track Monaco --year 2024
-
 # Load settings from a config file
-python main.py --config configs/example.toml
+python main.py --config docs/configs/example.yaml
+
+# Override config values via env vars
+F1_TRACK=Monza python main.py --config docs/configs/example.yaml
 
 # Monaco with specific driver
 python main.py --track Monaco --driver LEC --plot
@@ -281,20 +276,19 @@ python main.py --track Monaco --collocation hermite_simpson --plot # Accurate, 4
 Resolution order is:
 
 1. Built-in defaults
-2. Preset (`--preset`)
-3. Config file (`--config`)
-4. Explicit CLI flags (highest priority)
+2. Config file (`--config`)
+3. Explicit CLI flags (highest priority)
 
 ### Config File Format
 
-Use JSON or TOML with keys that match CLI flag names (without the `--`). You can also wrap the values under an `args` key.
+Use JSON or YAML with keys that match CLI flag names (without the `--`).
 
-```toml
-track = "Monza"
-year = 2024
-initial_soc = 0.55
-final_soc_min = 0.45
-collocation = "trapezoidal"
+```yaml
+track: Monza
+year: 2024
+initial_soc: 0.55
+final_soc_min: 0.45
+collocation: trapezoidal
 ```
 
 ---

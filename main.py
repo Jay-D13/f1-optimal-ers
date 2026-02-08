@@ -1,11 +1,8 @@
-import argparse
-import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-import tomllib
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -16,6 +13,7 @@ from solvers import (
 )
 from models import F1TrackModel, VehicleDynamicsModel
 from config import ERSConfig, VehicleConfig, get_vehicle_config, get_ers_config
+from config.app_config import AppConfig, build_parser
 from utils import RunManager, export_results
 from visualization import (
     visualize_track,
@@ -24,122 +22,6 @@ from visualization import (
     visualize_lap_animated,
     plot_simple_results
 )
-
-
-DEFAULTS = {
-    "track": "Monaco",
-    "year": 2024,
-    "driver": None,
-    "initial_soc": 0.5,
-    "final_soc_min": 0.3,
-    "ds": 5.0,
-    "laps": 1,
-    "per_lap_final_soc_min": None,
-    "use_tumftm": False,
-    "plot": True,
-    "save_animation": False,
-    "solver": "nlp",
-    "collocation": "euler",
-    "nlp_solver": "auto",
-    "ipopt_linear_solver": "mumps",
-    "ipopt_hessian": "limited-memory",
-    "regulations": "2025",
-}
-
-
-PRESETS = {
-    "quick": {
-        "collocation": "euler",
-        "ds": 10.0,
-        "plot": False,
-    },
-    "balanced": {
-        "collocation": "trapezoidal",
-        "ds": 5.0,
-    },
-    "accurate": {
-        "collocation": "hermite_simpson",
-        "ds": 2.5,
-    },
-    "multi-lap": {
-        "laps": 10,
-        "initial_soc": 0.55,
-        "final_soc_min": 0.45,
-        "per_lap_final_soc_min": 0.40,
-    },
-}
-
-
-CHOICES = {
-    "solver": ("nlp",),
-    "collocation": ("euler", "trapezoidal", "hermite_simpson"),
-    "nlp_solver": ("auto", "ipopt", "fatrop", "sqpmethod"),
-    "ipopt_hessian": ("limited-memory", "exact"),
-    "regulations": ("2025", "2026"),
-}
-
-
-def _load_config(path: str | None) -> dict:
-    if not path:
-        return {}
-
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    suffix = config_path.suffix.lower()
-    content = config_path.read_text()
-
-    if suffix == ".toml":
-        data = tomllib.loads(content)
-    elif suffix == ".json":
-        data = json.loads(content)
-    else:
-        raise ValueError("Unsupported config format. Use .toml or .json")
-
-    if isinstance(data, dict) and isinstance(data.get("args"), dict):
-        data = data["args"]
-
-    if not isinstance(data, dict):
-        raise ValueError("Config must be a JSON/TOML object")
-
-    return data
-
-
-def _normalize_overrides(source: str, overrides: dict) -> dict:
-    unknown_keys = [key for key in overrides.keys() if key not in DEFAULTS]
-    if unknown_keys:
-        joined = ", ".join(sorted(unknown_keys))
-        print(f"Warning: ignoring unknown {source} keys: {joined}")
-
-    normalized = {key: value for key, value in overrides.items() if key in DEFAULTS}
-    for key, value in normalized.items():
-        if key in CHOICES and value is not None and value not in CHOICES[key]:
-            allowed = ", ".join(CHOICES[key])
-            raise ValueError(
-                f"Invalid {source} value for '{key}': {value}. Allowed: {allowed}"
-            )
-
-    return normalized
-
-
-def _resolve_args(cli_args, preset_overrides: dict, config_overrides: dict):
-    resolved = DEFAULTS.copy()
-    resolved.update(preset_overrides)
-    resolved.update(config_overrides)
-
-    for key, value in vars(cli_args).items():
-        if value is not None:
-            resolved[key] = value
-
-    return argparse.Namespace(**resolved)
-
-
-def _print_presets():
-    print("Available presets:")
-    for name, values in PRESETS.items():
-        rendered = ", ".join(f"{k}={v}" for k, v in values.items())
-        print(f"  {name}: {rendered}")
 
 
 def _format_multi_lap_breakdown(trajectory) -> str:
@@ -177,11 +59,6 @@ def main(args):
     print("\n" + "="*70)
     print("CONFIGURATION")
     print("="*70)
-
-    if getattr(args, "preset", None):
-        print(f"Preset: {args.preset}")
-    if getattr(args, "config", None):
-        print(f"Config file: {args.config}")
     
     ers_config = get_ers_config(args.regulations)
     
@@ -498,101 +375,10 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='F1 ERS Optimal Control',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-        Examples:
-        python main.py --track Monaco --plot
-        python main.py --track Monza --initial-soc 0.6 --plot --save-animation
-        python main.py --track Spa --year 2023 --driver VER --plot
-        python main.py --track Monza --laps 10 --final-soc-min 0.45
+    parser = build_parser()
+    namespace = parser.parse_args()
+    args_dict = vars(namespace)
+    args_dict.pop("config", None)
+    args = AppConfig(**args_dict)
 
-        # Compare collocation methods:
-        python main.py --track Monaco --collocation euler --plot
-        python main.py --track Monaco --collocation trapezoidal --plot
-        python main.py --track Monaco --collocation hermite_simpson --plot
-
-        # Use a preset or config
-        python main.py --preset quick --track Monaco
-        python main.py --config configs/monza.toml
-
-        Collocation Methods:
-        euler            - 1st order explicit Euler (fastest, least accurate)
-        trapezoidal      - 2nd order implicit trapezoidal (good balance)
-        hermite_simpson  - 4th order Hermite-Simpson (most accurate, slower)
-        """
-    )
-
-    parser.add_argument('--config', type=str, default=None,
-                        help='Path to JSON/TOML config file with default args')
-    parser.add_argument('--preset', type=str, default=None,
-                        choices=sorted(PRESETS.keys()),
-                        help='Apply a preset argument bundle')
-    parser.add_argument('--list-presets', action='store_true',
-                        help='List available presets and exit')
-
-    parser.add_argument('--track', type=str, default=None,
-                        help='Track name (e.g., Monaco, Monza, Spa)')
-    parser.add_argument('--year', type=int, default=None,
-                        help='Season year for FastF1 data')
-    parser.add_argument('--driver', type=str, default=None,
-                        help='Driver code for FastF1 (e.g., VER, HAM)')
-    parser.add_argument('--initial-soc', type=float, default=None,
-                        help='Initial battery SOC (0.0-1.0)')
-    parser.add_argument('--final-soc-min', type=float, default=None,
-                        help='Minimum final SOC (0.0-1.0)')
-    parser.add_argument('--ds', type=float, default=None,
-                        help='Spatial discretization step in meters')
-    parser.add_argument('--laps', type=int, default=None,
-                        help='Number of consecutive laps in NLP horizon (1 = single lap)')
-    parser.add_argument('--per-lap-final-soc-min', type=float, default=None,
-                        help='Optional SOC floor enforced at the end of every lap')
-    parser.add_argument('--use-tumftm', action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help='Prefer TUMFTM raceline if available')
-    parser.add_argument('--plot', action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help='Generate plots')
-    parser.add_argument('--save-animation', action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help='Save lap animation (slow, optional)')
-    parser.add_argument('--solver', type=str, default=None,
-                        choices=['nlp'],
-                        help='Solver to use (nlp is fully implemented)')
-    parser.add_argument('--collocation', type=str, default=None,
-                        choices=['euler', 'trapezoidal', 'hermite_simpson'],
-                        help='Collocation method: euler (1st order), trapezoidal (2nd order), hermite_simpson (4th order)')
-    parser.add_argument('--nlp-solver', type=str, default=None,
-                        choices=['auto', 'ipopt', 'fatrop', 'sqpmethod'],
-                        help='NLP backend solver (auto: fatrop on Apple Silicon, ipopt otherwise)')
-    parser.add_argument('--ipopt-linear-solver', type=str, default=None,
-                        help='Ipopt linear solver backend (e.g. mumps)')
-    parser.add_argument('--ipopt-hessian', type=str, default=None,
-                        choices=['limited-memory', 'exact'],
-                        help='Ipopt Hessian approximation mode')
-    parser.add_argument('--regulations', type=str, default=None,
-                        choices=['2025', '2026'],
-                        help='Choose "2025" for the V6 Turbo Hybrid era rules (2014-2025) or "2026" for new upcoming engine specs')
-
-    args = parser.parse_args()
-
-    if args.list_presets:
-        _print_presets()
-        raise SystemExit(0)
-
-    try:
-        config_overrides = _load_config(args.config)
-        config_overrides = _normalize_overrides("config", config_overrides)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
-        parser.error(str(exc))
-
-    preset_overrides = PRESETS.get(args.preset, {}) if args.preset else {}
-    try:
-        preset_overrides = _normalize_overrides(f"preset '{args.preset}'", preset_overrides)
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    resolved_args = _resolve_args(args, preset_overrides, config_overrides)
-
-    optimal_trajectory, run_manager = main(resolved_args)
+    optimal_trajectory, run_manager = main(args)
