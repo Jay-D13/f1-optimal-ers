@@ -11,14 +11,19 @@ from solvers import (
     SpatialNLPSolver,
 )
 from models import F1TrackModel, VehicleDynamicsModel
-from config import ERSConfig, VehicleConfig, get_vehicle_config, get_ers_config
-from utils import RunManager, export_results
+from config import VehicleConfig, get_vehicle_config, get_ers_config
+from simulation import simulate_multiple_laps
+from strategies import OptimalTrackingStrategy
+from utils import RunManager, export_results, export_multilap_results
 from visualization import (
     visualize_track,
     plot_offline_solution,
     create_comparison_plot,
     visualize_lap_animated,
-    plot_simple_results
+    plot_simple_results,
+    plot_multilap_overview,
+    plot_multilap_distance_heatmap,
+    plot_multilap_speed_overlay,
 )
 
 
@@ -139,6 +144,34 @@ def main(args):
         final_soc_min=args.final_soc_min,
         is_flying_lap=USE_FLYING_LAP
     )
+
+    # =========================================================================
+    multi_lap_result = None
+    if args.multi_lap > 1:
+        print("\n" + "="*70)
+        print(f"PHASE 3 - MULTI-LAP DIAGNOSTICS ({args.multi_lap} laps)")
+        print("="*70)
+        strategy = OptimalTrackingStrategy(
+            vehicle_config,
+            ers_config,
+            track,
+            reference_profile=optimal_trajectory,
+        )
+        initial_velocity_multilap = float(optimal_trajectory.v_opt[0])
+        multi_lap_result = simulate_multiple_laps(
+            vehicle_model=vehicle_model,
+            track_model=track,
+            controller=strategy,
+            num_laps=args.multi_lap,
+            initial_soc=args.initial_soc,
+            initial_velocity=initial_velocity_multilap,
+            reference=optimal_trajectory,
+            dt=0.1,
+        )
+        print(f"   Completed laps: {multi_lap_result.completed_laps}/{args.multi_lap}")
+        lap_times = [f"{s['lap_time']:.3f}s" for s in multi_lap_result.lap_summaries]
+        print(f"   Lap times: {', '.join(lap_times)}")
+        print(f"   Final SOC after multi-lap: {multi_lap_result.final_soc * 100:.2f}%")
     
     # =========================================================================
     print("\n" + "="*70)
@@ -188,6 +221,23 @@ def main(args):
 
         {'='*70}
     """
+
+    if multi_lap_result is not None:
+        lap_summary_lines = [
+            (
+                f"Lap {item['lap']}: {item['lap_time']:.3f}s | "
+                f"SOC {item['soc_start']*100:.1f}% -> {item['soc_end']*100:.1f}% | "
+                f"Net {item['net_energy_MJ']:.3f} MJ"
+            )
+            for item in multi_lap_result.lap_summaries
+        ]
+        summary_text += (
+            "\nMULTI-LAP DIAGNOSTICS:\n"
+            f"Requested Laps:         {args.multi_lap}\n"
+            f"Completed Laps:         {multi_lap_result.completed_laps}\n"
+            + "\n".join(lap_summary_lines)
+            + "\n"
+        )
     
     print(summary_text)
     run_manager.save_summary(summary_text)
@@ -211,6 +261,18 @@ def main(args):
     run_manager.save_numpy(optimal_trajectory.P_ers_opt, 'ers_power')
     run_manager.save_numpy(optimal_trajectory.throttle_opt, 'throttle')
     run_manager.save_numpy(optimal_trajectory.brake_opt, 'brake')
+
+    if multi_lap_result is not None:
+        run_manager.save_json(export_multilap_results(multi_lap_result), "multi_lap_summary")
+        run_manager.save_numpy(multi_lap_result.times, "multi_lap_times")
+        run_manager.save_numpy(multi_lap_result.lap_index_states, "multi_lap_index_states")
+        run_manager.save_numpy(multi_lap_result.positions, "multi_lap_positions")
+        run_manager.save_numpy(multi_lap_result.positions_absolute, "multi_lap_positions_absolute")
+        run_manager.save_numpy(multi_lap_result.velocities, "multi_lap_velocities")
+        run_manager.save_numpy(multi_lap_result.socs, "multi_lap_socs")
+        run_manager.save_numpy(multi_lap_result.controls_time, "multi_lap_controls_time")
+        run_manager.save_numpy(multi_lap_result.lap_index_controls, "multi_lap_index_controls")
+        run_manager.save_numpy(multi_lap_result.P_ers_history, "multi_lap_ers_power")
     
     # =========================================================================
     if args.plot:
@@ -225,14 +287,16 @@ def main(args):
             track_name=args.track,
             driver_name=driver
         )
-        run_manager.save_plot(fig_track, '01_track_analysis')
-        plt.close(fig_track)
+        if fig_track is not None:
+            run_manager.save_plot(fig_track, '01_track_analysis')
+            plt.close(fig_track)
         
         # Offline solution (reusing existing function)
         print("\n Offline Solution...")
         fig_offline = plot_offline_solution(
             optimal_trajectory,
-            title=f"{args.track} - Offline Optimal Solution ({args.collocation})"
+            title=f"{args.track} - Offline Optimal Solution ({args.collocation})",
+            ers_config=ers_config,
         )
         run_manager.save_plot(fig_offline, '02_offline_solution')
         plt.close(fig_offline)
@@ -244,7 +308,8 @@ def main(args):
             velocity_profile_no_ers.v,
             velocity_profile_with_ers.v,
             optimal_trajectory,
-            args.track
+            args.track,
+            ers_config=ers_config,
         )
         run_manager.save_plot(fig_comparison, '03_ers_comparison')
         plt.close(fig_comparison)
@@ -255,7 +320,8 @@ def main(args):
             optimal_trajectory, 
             velocity_profile_no_ers, 
             track, 
-            args.track
+            args.track,
+            ers_config=ers_config,
         )
         run_manager.save_plot(fig_simple, '04_simple_results')
         plt.close(fig_simple)
@@ -280,14 +346,48 @@ def main(args):
             }
             
             animation_path = run_manager.plots_dir / "05_lap_animation.gif"
-            fig_anim, anim = visualize_lap_animated( # TODO fix speed slow down and speed up of ego car
+            fig_anim, anim = visualize_lap_animated(
                 track,
                 results_dict_for_anim,
                 strategy_name="Optimal ERS",
-                save_path=str(animation_path)
+                save_path=str(animation_path),
+                timing_mode=args.animation_timing_mode,
+                trail_length_m=args.animation_trail_m,
+                ers_config=ers_config,
             )
-            print(f"   ✓ Saved 05_lap_animation.gif")
-            plt.close(fig_anim)
+            if fig_anim is not None:
+                print(f"   ✓ Saved 05_lap_animation.gif")
+                plt.close(fig_anim)
+
+        if multi_lap_result is not None:
+            print("\n Multi-Lap Overview...")
+            fig_multilap_overview = plot_multilap_overview(
+                multi_lap_result,
+                track_name=args.track,
+                ers_config=ers_config,
+            )
+            run_manager.save_plot(fig_multilap_overview, "06_multilap_overview")
+            plt.close(fig_multilap_overview)
+
+            print("\n Multi-Lap Distance Heatmap...")
+            fig_multilap_heatmap = plot_multilap_distance_heatmap(
+                multi_lap_result,
+                track_name=args.track,
+                track_length_m=track.total_length,
+                ds_m=track.ds,
+            )
+            run_manager.save_plot(fig_multilap_heatmap, "07_multilap_ers_heatmap")
+            plt.close(fig_multilap_heatmap)
+
+            print("\n Multi-Lap Speed Overlay...")
+            fig_multilap_speed = plot_multilap_speed_overlay(
+                multi_lap_result,
+                track_name=args.track,
+                track_length_m=track.total_length,
+                ds_m=track.ds,
+            )
+            run_manager.save_plot(fig_multilap_speed, "08_multilap_speed_overlay")
+            plt.close(fig_multilap_speed)
         
         print("\n✓ All plots saved!")
     
@@ -308,6 +408,8 @@ if __name__ == "__main__":
         python main.py --track Monaco --plot
         python main.py --track Monza --initial-soc 0.6 --plot --save-animation
         python main.py --track Spa --year 2023 --driver VER --plot
+        python main.py --track Monaco --plot --multi-lap 5
+        python main.py --track Monaco --plot --save-animation --animation-timing-mode physical --animation-trail-m 150
         
         # Compare collocation methods:
         python main.py --track Monaco --collocation euler --plot
@@ -337,6 +439,13 @@ if __name__ == "__main__":
                         help='Generate plots')
     parser.add_argument('--save-animation', action='store_true',
                         help='Save lap animation (slow, optional)')
+    parser.add_argument('--animation-timing-mode', type=str, default='physical',
+                        choices=['physical', 'smooth'],
+                        help='Animation timing mode: physical (time-accurate) or smooth')
+    parser.add_argument('--animation-trail-m', type=float, default=120.0,
+                        help='Animated trail length in meters')
+    parser.add_argument('--multi-lap', type=int, default=1,
+                        help='Run multi-lap diagnostics using consecutive laps with SOC carry-over')
     parser.add_argument('--solver', type=str, default='nlp',
                         choices=['nlp'],
                         help='Solver to use (nlp is fully implemented)')

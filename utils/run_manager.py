@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from models import F1TrackModel
 from solvers import OptimalTrajectory
+from simulation.lap import MultiLapResult
 
 class RunManager:
     """Manages results directory structure and file saving"""
@@ -120,3 +121,13 @@ def export_results(optimal_trajectory: OptimalTrajectory,
     }
     
     return results
+
+
+def export_multilap_results(multi_lap_result: MultiLapResult) -> Dict:
+    """Export compact multi-lap diagnostics payload."""
+    return {
+        "requested_laps": int(multi_lap_result.requested_laps),
+        "completed_laps": int(multi_lap_result.completed_laps),
+        "lap_summaries": multi_lap_result.lap_summaries,
+        "final_soc": float(multi_lap_result.final_soc),
+    }

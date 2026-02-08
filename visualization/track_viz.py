@@ -1,11 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from itertools import groupby
+from visualization.plot_config import apply_plot_style
 
 def visualize_track(track_model, track_name=None, driver_name=None, save_path=None):
     if track_model.telemetry_data is None:
         print("No telemetry data available for visualization")
         return
+
+    apply_plot_style()
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
@@ -41,12 +44,14 @@ def visualize_track(track_model, track_name=None, driver_name=None, save_path=No
     ax.set_title('Track Layout (colored by corner radius)')
     ax.set_aspect('equal')
     cbar = plt.colorbar(scatter, ax=ax, label='log10(Radius (m))')
-    cbar.ax.set_yticklabels(['10m', '100m', '1km', '10km'])
+    cbar.set_ticks([1, 2, 3, 4])
+    cbar.set_ticklabels(['10m', '100m', '1km', '10km'])
     ax.grid(True, alpha=0.3)
     
     # --- Plot 3: Speed Profile ---
     ax = axes[1, 0]
-    ax.plot(distances, speeds, 'b-', linewidth=1, alpha=0.7)
+    distances_km = distances / 1000.0
+    ax.plot(distances_km, speeds, 'b-', linewidth=1.2, alpha=0.8)
     
     # which indices are corners
     is_corner = [seg.radius < 100 for seg in track_model.segments]
@@ -55,23 +60,23 @@ def visualize_track(track_model, track_name=None, driver_name=None, save_path=No
     for is_tight, group in groupby(is_corner):
         count = sum(1 for _ in group)
         if is_tight:
-            start_dist = track_model.segments[current_idx].distance
+            start_dist = track_model.segments[current_idx].distance / 1000.0
             # The end distance is the start of the next block
-            end_dist = start_dist + (count * track_model.ds)
+            end_dist = start_dist + (count * track_model.ds / 1000.0)
             
             ax.axvspan(start_dist, end_dist, alpha=0.1, color='red')
             
         current_idx += count
 
-    ax.set_xlabel('Distance (m)')
+    ax.set_xlabel('Distance (km)')
     ax.set_ylabel('Speed (km/h)')
     ax.set_title('Speed Profile (Red = Radius < 100m)')
     ax.grid(True, alpha=0.3)
     
     # --- Plot 4: Radius vs Distance ---
     ax = axes[1, 1]
-    ax.plot(segment_distances, segment_radii, 'r-', linewidth=2)
-    ax.set_xlabel('Distance (m)')
+    ax.plot(segment_distances / 1000.0, segment_radii, 'r-', linewidth=2)
+    ax.set_xlabel('Distance (km)')
     ax.set_ylabel('Corner Radius (m)')
     ax.set_title('Track Curvature')
     ax.set_ylim([0, 1000])

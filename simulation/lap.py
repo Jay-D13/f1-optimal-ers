@@ -50,6 +50,41 @@ class LapResult:
             self.brake_history
         ])
 
+
+@dataclass
+class MultiLapResult:
+    """Container for consecutive multi-lap simulation outputs."""
+
+    lap_results: List[LapResult]
+    lap_summaries: List[Dict]
+    requested_laps: int
+    completed_laps: int
+
+    # Concatenated state time series (tagged by lap index)
+    times: np.ndarray
+    lap_index_states: np.ndarray
+    positions: np.ndarray            # Wrapped (0..track_length)
+    positions_absolute: np.ndarray   # Continuous across laps
+    velocities: np.ndarray
+    socs: np.ndarray
+
+    # Concatenated control time series (tagged by lap index)
+    controls_time: np.ndarray
+    lap_index_controls: np.ndarray
+    P_ers_history: np.ndarray
+    throttle_history: np.ndarray
+    brake_history: np.ndarray
+
+    @property
+    def lap_times(self) -> np.ndarray:
+        return np.array([lap.lap_time for lap in self.lap_results], dtype=float)
+
+    @property
+    def final_soc(self) -> float:
+        if not self.lap_results:
+            return np.nan
+        return float(self.lap_results[-1].final_soc)
+
 class LapSimulator:
     """Simulate a complete lap with given controller"""
     
@@ -220,6 +255,123 @@ class LapSimulator:
             energy_recovered=trajectory.energy_recovered,
             completed=True,
         )
+
+
+def simulate_multiple_laps(
+    vehicle_model: VehicleDynamicsModel,
+    track_model: F1TrackModel,
+    controller,
+    num_laps: int = 1,
+    initial_soc: float = 0.5,
+    initial_velocity: float = 30.0,
+    max_time_per_lap: float = 200.0,
+    reference: Optional[OptimalTrajectory] = None,
+    dt: float = 0.1,
+    reset_strategy_each_lap: bool = True,
+) -> MultiLapResult:
+    """
+    Simulate consecutive laps with SOC and exit-velocity carry-over.
+    """
+    if num_laps < 1:
+        raise ValueError("num_laps must be >= 1")
+    if controller is None:
+        raise ValueError("simulate_multiple_laps requires a controller instance")
+
+    lap_results: List[LapResult] = []
+    lap_summaries: List[Dict] = []
+
+    cat_times: List[np.ndarray] = []
+    cat_lap_idx_states: List[np.ndarray] = []
+    cat_positions: List[np.ndarray] = []
+    cat_positions_abs: List[np.ndarray] = []
+    cat_velocities: List[np.ndarray] = []
+    cat_socs: List[np.ndarray] = []
+
+    cat_control_times: List[np.ndarray] = []
+    cat_lap_idx_controls: List[np.ndarray] = []
+    cat_p_ers: List[np.ndarray] = []
+    cat_throttle: List[np.ndarray] = []
+    cat_brake: List[np.ndarray] = []
+
+    current_soc = float(initial_soc)
+    current_velocity = float(initial_velocity)
+    time_offset = 0.0
+    track_length = float(track_model.total_length)
+
+    for lap_idx in range(num_laps):
+        if reset_strategy_each_lap and hasattr(controller, "reset"):
+            controller.reset()
+
+        simulator = LapSimulator(vehicle_model, track_model, controller, dt=dt)
+        lap = simulator.simulate_lap(
+            initial_soc=current_soc,
+            initial_velocity=current_velocity,
+            max_time=max_time_per_lap,
+            reference=reference,
+        )
+        lap_results.append(lap)
+
+        lap_number = lap_idx + 1
+        cat_times.append(lap.times + time_offset)
+        cat_lap_idx_states.append(np.full_like(lap.times, lap_number, dtype=int))
+        cat_positions.append(np.mod(lap.positions, track_length))
+        cat_positions_abs.append(lap.positions + lap_idx * track_length)
+        cat_velocities.append(lap.velocities)
+        cat_socs.append(lap.socs)
+
+        n_controls = len(lap.P_ers_history)
+        control_times = lap.times[:n_controls] + time_offset
+        cat_control_times.append(control_times)
+        cat_lap_idx_controls.append(np.full(n_controls, lap_number, dtype=int))
+        cat_p_ers.append(lap.P_ers_history)
+        cat_throttle.append(lap.throttle_history)
+        cat_brake.append(lap.brake_history)
+
+        lap_summaries.append(
+            {
+                "lap": lap_number,
+                "completed": bool(lap.completed),
+                "soc_start": float(current_soc),
+                "soc_end": float(lap.final_soc),
+                "lap_time": float(lap.lap_time),
+                "energy_deployed_MJ": float(lap.energy_deployed / 1e6),
+                "energy_recovered_MJ": float(lap.energy_recovered / 1e6),
+                "net_energy_MJ": float((lap.energy_deployed - lap.energy_recovered) / 1e6),
+                "entry_velocity_kmh": float(current_velocity * 3.6),
+                "exit_velocity_kmh": float(lap.velocities[-1] * 3.6),
+            }
+        )
+
+        current_soc = float(lap.final_soc)
+        current_velocity = float(lap.velocities[-1])
+        time_offset += float(lap.lap_time)
+
+        if not lap.completed:
+            break
+
+    def _concat(chunks: List[np.ndarray], dtype=float) -> np.ndarray:
+        if not chunks:
+            return np.array([], dtype=dtype)
+        return np.concatenate(chunks)
+
+    completed_laps = sum(1 for lap in lap_results if lap.completed)
+    return MultiLapResult(
+        lap_results=lap_results,
+        lap_summaries=lap_summaries,
+        requested_laps=num_laps,
+        completed_laps=completed_laps,
+        times=_concat(cat_times),
+        lap_index_states=_concat(cat_lap_idx_states, dtype=int),
+        positions=_concat(cat_positions),
+        positions_absolute=_concat(cat_positions_abs),
+        velocities=_concat(cat_velocities),
+        socs=_concat(cat_socs),
+        controls_time=_concat(cat_control_times),
+        lap_index_controls=_concat(cat_lap_idx_controls, dtype=int),
+        P_ers_history=_concat(cat_p_ers),
+        throttle_history=_concat(cat_throttle),
+        brake_history=_concat(cat_brake),
+    )
 
 def compare_strategies(vehicle_model,
                        track_model,

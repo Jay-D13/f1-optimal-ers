@@ -1,5 +1,12 @@
 from .base import BaseStrategy
-from .baselines import TrackingStrategy, GreedyStrategy, TargetSOCStrategy, AlwaysDeployStrategy, SmartRuleBasedStrategy, OptimalTrackingStrategy
+from .baselines import (
+    TrackingStrategy,
+    GreedyStrategy,
+    TargetSOCStrategy,
+    AlwaysDeployStrategy,
+    SmartRuleBasedStrategy,
+    OptimalTrackingStrategy,
+)
 
 
 __all__ = [
@@ -9,4 +16,5 @@ __all__ = [
     'TargetSOCStrategy',
     'AlwaysDeployStrategy',
     'SmartRuleBasedStrategy',
+    'OptimalTrackingStrategy',
 ]
