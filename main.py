@@ -18,7 +18,7 @@ from config import (
     get_vehicle_config,
     get_ers_config,
 )
-from config.app_config import AppConfig, build_parser
+from config.app_config import AppConfig, app
 from utils import RunManager, build_lap_grip_scales, export_results
 from visualization import (
     visualize_track,
@@ -158,16 +158,13 @@ def main(args):
     print("PHASE 1 - VELOCITY PROFILE (Forward-Backward)")
     print("="*70)
     
-    # Enable Flying Lap! -> Flying lap means it's a continuous lap without start from startline
-    USE_FLYING_LAP = True # TODO make argument
-    
-    print(f"\n   Computing theoretical profile WITHOUT ERS (Flying: {USE_FLYING_LAP})...")
+    print(f"\n   Computing theoretical profile WITHOUT ERS (Flying: {args.flying_lap})...")
     fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
-    velocity_profile_no_ers = fb_solver.solve(flying_lap=USE_FLYING_LAP)
-    
-    print(f"\n   Computing theoretical profile WITH ERS (Flying: {USE_FLYING_LAP})...")
+    velocity_profile_no_ers = fb_solver.solve(flying_lap=args.flying_lap)
+
+    print(f"\n   Computing theoretical profile WITH ERS (Flying: {args.flying_lap})...")
     fb_solver.use_ers_power = True
-    velocity_profile_with_ers = fb_solver.solve(flying_lap=USE_FLYING_LAP)
+    velocity_profile_with_ers = fb_solver.solve(flying_lap=args.flying_lap)
     
     print(f"\n   Results:")
     print(f"     No ERS:   {velocity_profile_no_ers.lap_time:.3f}s "
@@ -211,7 +208,7 @@ def main(args):
             v_limit_profile=velocity_profile_with_ers.v,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
-            is_flying_lap=USE_FLYING_LAP,
+            is_flying_lap=args.flying_lap,
         )
     else:
         nlp_solver = MultiLapSpatialNLPSolver(
@@ -229,7 +226,7 @@ def main(args):
             n_laps=args.laps,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
-            is_flying_lap=USE_FLYING_LAP,
+            is_flying_lap=args.flying_lap,
             per_lap_final_soc_min=args.per_lap_final_soc_min,
             lap_grip_scales=lap_grip_scales,
         )
@@ -423,10 +420,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = build_parser()
-    namespace = parser.parse_args()
-    args_dict = vars(namespace)
-    args_dict.pop("config", None)
-    args = AppConfig(**args_dict)
-
-    optimal_trajectory, run_manager = main(args)
+    app()

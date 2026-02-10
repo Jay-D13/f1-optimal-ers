@@ -234,7 +234,8 @@ python main.py [OPTIONS]
 | `--nlp-solver` | str | `auto` | NLP backend: `auto`, `ipopt`, `fatrop`, or `sqpmethod` |
 | `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |
 | `--ipopt-hessian` | str | `limited-memory` | Ipopt Hessian mode: `limited-memory` or `exact` |
-| `--use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
+| `--flying-lap/--no-flying-lap` | flag | `True` | Continuous lap (no standing start) |
+| `--use-tumftm/--no-use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
 | `--plot/--no-plot` | flag | `True` | Enable or disable visualization plots |
 | `--save-animation/--no-save-animation` | flag | `False` | Enable or disable animated lap visualization |
 | `--solver` | str | `nlp` | Solver type (nlp is fully implemented) |
@@ -244,9 +245,6 @@ python main.py [OPTIONS]
 ```bash
 # Load settings from a config file
 python main.py --config docs/configs/example.yaml
-
-# Override config values via env vars
-F1_TRACK=Monza python main.py --config docs/configs/example.yaml
 
 # Monaco with specific driver
 python main.py --track Monaco --driver LEC --plot

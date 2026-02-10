@@ -6,6 +6,7 @@ final_soc_min: 0.45
 ds: 5.0
 laps: 10
 per_lap_final_soc_min: 0.40
+flying_lap: true
 use_tumftm: false
 plot: true
 save_animation: false

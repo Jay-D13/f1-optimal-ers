@@ -4,5 +4,5 @@ pandas>=1.3.0
 casadi>=3.5.5
 fastf1>=3.0.0
 matplotlib>=3.4.0
-jsonargparse>=4.0.0
+typer>=0.9.0
 pyyaml>=6.0.0
