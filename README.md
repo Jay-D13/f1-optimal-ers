@@ -30,6 +30,7 @@
 - [Results & Outputs](#results--outputs)
 - [Project Structure](#project-structure)
 - [Technical Details](#technical-details)
+- [Roadmap](#roadmap)
 - [References](#references)
 
 ---
@@ -586,6 +587,29 @@ x[k+1] = x[k] + (h/6)·(f[k] + 4·f_mid + f[k+1])       # Simpson quadrature
 ```
 
 **Recommendation**: Use `--collocation trapezoidal` for general use, `--collocation hermite_simpson` for final results or when comparing against real telemetry.
+
+---
+
+## Roadmap
+
+### Modeling Fidelity
+
+- [ ] **Dynamic Tire Model**: Upgrade the static "friction circle with load-dependent coefficients" to include thermal degradation and wear factors for multi-lap accuracy.
+- [ ] **3D Track Geometry**: Integrate elevation and banking data to improve the accuracy of the "vehicle dynamics and track geometry" constraints.
+
+### Analysis & Validation
+
+- [ ] **Sensitivity Analysis**: Create a script to sweep parameters (mass, drag, grip) and plot their impact on lap time and optimal ERS usage.
+- [ ] **Validation Overlays**: Add an automated plot comparing the "Optimal" velocity profile directly against the loaded "FastF1" telemetry to visually quantify.
+
+### Tooling & Reproducibility
+
+- [ ] **Docker Support**: Containerize the environment to standardize the installation of `uv`, `ipopt`, and linear solvers (MA97/MUMPS) across different operating systems.
+
+### Strategy & Learning
+
+- [ ] **Race Strategy Solver**: Expand the "Multi-lap stint optimization" to include stint-level tire-compound choices.
+- [ ] **RL**: hybrid residual model-based RL
 
 ---
 

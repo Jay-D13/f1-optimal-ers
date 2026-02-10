@@ -80,21 +80,13 @@ def export_results(
     track: F1TrackModel,
     args,
     *,
-    pit_recommendation: Dict | None = None,
     lap_grip_scales: np.ndarray | None = None,
-    total_time_optimal_override: float | None = None,
 ) -> Dict:
 
     energy_stats = optimal_trajectory.compute_energy_stats()
     n_laps = max(1, int(getattr(optimal_trajectory, "n_laps", 1)))
     baseline_total = float(velocity_profile.lap_time) * n_laps
     
-    total_optimal_time = (
-        float(total_time_optimal_override)
-        if total_time_optimal_override is not None
-        else float(optimal_trajectory.lap_time)
-    )
-
     results = {
         'metadata': {
             'track': args.track,
@@ -113,11 +105,6 @@ def export_results(
             'enable_tire_degradation': getattr(args, 'enable_tire_degradation', False),
             'tire_wear_rate_per_lap': getattr(args, 'tire_wear_rate_per_lap', None),
             'tire_min_grip_scale': getattr(args, 'tire_min_grip_scale', None),
-            'recommend_pit_stop': getattr(args, 'recommend_pit_stop', False),
-            'pit_loss_time': getattr(args, 'pit_loss_time', None),
-            'pit_window_start_lap': getattr(args, 'pit_window_start_lap', None),
-            'pit_window_end_lap': getattr(args, 'pit_window_end_lap', None),
-            'pit_eval_step_lap': getattr(args, 'pit_eval_step_lap', None),
         },
         'track_info': {
             'total_length': float(track.total_length),
@@ -125,9 +112,9 @@ def export_results(
             'ds': float(track.ds),
         },
         'performance': {
-            'lap_time': total_optimal_time,
+            'lap_time': float(optimal_trajectory.lap_time),
             'lap_time_no_ers': baseline_total,
-            'time_improvement': float(baseline_total - total_optimal_time),
+            'time_improvement': float(baseline_total - optimal_trajectory.lap_time),
             'solver_status': optimal_trajectory.solver_status,
             'solve_time': float(optimal_trajectory.solve_time),
             'lap_times': (
@@ -160,7 +147,5 @@ def export_results(
         results['tire_degradation'] = {
             'lap_grip_scales': lap_grip_scales,
         }
-    if pit_recommendation is not None:
-        results['pit_recommendation'] = pit_recommendation
     
     return results

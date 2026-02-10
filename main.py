@@ -10,14 +10,11 @@ from solvers import (
     ForwardBackwardSolver,
     SpatialNLPSolver,
     MultiLapSpatialNLPSolver,
-    PitRecommendationResult,
-    recommend_one_stop_pit,
 )
 from models import F1TrackModel, VehicleDynamicsModel
 from config import (
     ERSConfig,
     VehicleConfig,
-    get_default_pit_loss,
     get_vehicle_config,
     get_ers_config,
 )
@@ -61,28 +58,6 @@ def _format_lap_grip_scales(lap_grip_scales: np.ndarray | None) -> str:
     return "\n".join(lines)
 
 
-def _format_pit_recommendation_table(pit_result: PitRecommendationResult | None) -> str:
-    """Format one-stop recommendation candidates."""
-    if pit_result is None:
-        return ""
-
-    lines = [
-        "        PIT STRATEGY CANDIDATES:",
-        "        Candidate   | Drive (s) | Pit Loss (s) | Total (s) | Δ vs No-Stop (s)",
-    ]
-    for candidate in pit_result.candidates_ranked:
-        label = "No-stop" if candidate.pit_lap_end is None else f"Pit@L{candidate.pit_lap_end}"
-        lines.append(
-            f"        {label:<11} | {candidate.driving_time_s:>9.3f} | "
-            f"{candidate.pit_loss_s:>12.3f} | {candidate.total_time_s:>9.3f} | "
-            f"{candidate.delta_vs_no_stop_s:>15.3f}"
-        )
-    best = pit_result.best_candidate
-    best_label = "No-stop" if best.pit_lap_end is None else f"Pit at end of lap {best.pit_lap_end}"
-    lines.append(f"        Recommended: {best_label}")
-    return "\n".join(lines)
-
-
 def main(args):
     """Main execution function."""
     
@@ -92,10 +67,6 @@ def main(args):
         raise ValueError("--tire_wear_rate_per_lap must be >= 0")
     if not (0.0 < args.tire_min_grip_scale <= 1.0):
         raise ValueError("--tire_min_grip_scale must be in (0, 1]")
-    if args.pit_eval_step_lap < 1:
-        raise ValueError("--pit_eval_step_lap must be >= 1")
-    if args.recommend_pit_stop and args.laps < 2:
-        raise ValueError("--recommend_pit_stop requires --laps >= 2")
 
     print("="*70)
     print("  F1 ERS OPTIMAL CONTROL")
@@ -144,17 +115,6 @@ def main(args):
     if args.enable_tire_degradation:
         print(f"Tire wear rate/lap: {args.tire_wear_rate_per_lap:.4f}")
         print(f"Tire minimum grip scale: {args.tire_min_grip_scale:.3f}")
-    print(f"Pit recommendation: {'ON' if args.recommend_pit_stop else 'OFF'}")
-    if args.recommend_pit_stop:
-        pit_loss_display = (
-            args.pit_loss_time
-            if args.pit_loss_time is not None
-            else get_default_pit_loss(args.track)
-        )
-        print(f"Pit loss used: {pit_loss_display:.2f}s")
-        print(f"Pit window start lap: {args.pit_window_start_lap}")
-        print(f"Pit window end lap: {args.pit_window_end_lap if args.pit_window_end_lap is not None else 'auto'}")
-        print(f"Pit candidate lap step: {args.pit_eval_step_lap}")
     
     # =========================================================================
     print("\n" + "="*70)
@@ -231,8 +191,6 @@ def main(args):
         else:
             print("   Tire degradation requested, but ignored for single-lap horizon.")
 
-    pit_recommendation: PitRecommendationResult | None = None
-
     # =========================================================================
     print("\n" + "="*70)
     print(f"PHASE 2 - ERS OPTIMIZATION (Spatial NLP - {args.collocation.upper()})")
@@ -266,38 +224,15 @@ def main(args):
             ipopt_linear_solver=args.ipopt_linear_solver,
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
-        if args.recommend_pit_stop:
-            pit_loss_time = (
-                args.pit_loss_time if args.pit_loss_time is not None else get_default_pit_loss(args.track)
-            )
-            wear_rate = args.tire_wear_rate_per_lap if args.enable_tire_degradation else 0.0
-            pit_recommendation = recommend_one_stop_pit(
-                solver=nlp_solver,
-                v_limit_profile=velocity_profile_with_ers.v,
-                n_laps=args.laps,
-                initial_soc=args.initial_soc,
-                final_soc_min=args.final_soc_min,
-                is_flying_lap=USE_FLYING_LAP,
-                per_lap_final_soc_min=args.per_lap_final_soc_min,
-                wear_rate_per_lap=wear_rate,
-                min_grip_scale=args.tire_min_grip_scale,
-                pit_loss_time_s=pit_loss_time,
-                pit_window_start_lap=args.pit_window_start_lap,
-                pit_window_end_lap=args.pit_window_end_lap,
-                pit_eval_step_lap=args.pit_eval_step_lap,
-            )
-            optimal_trajectory = pit_recommendation.best_candidate.trajectory
-            lap_grip_scales = pit_recommendation.best_candidate.lap_grip_scales
-        else:
-            optimal_trajectory = nlp_solver.solve(
-                v_limit_profile=velocity_profile_with_ers.v,
-                n_laps=args.laps,
-                initial_soc=args.initial_soc,
-                final_soc_min=args.final_soc_min,
-                is_flying_lap=USE_FLYING_LAP,
-                per_lap_final_soc_min=args.per_lap_final_soc_min,
-                lap_grip_scales=lap_grip_scales,
-            )
+        optimal_trajectory = nlp_solver.solve(
+            v_limit_profile=velocity_profile_with_ers.v,
+            n_laps=args.laps,
+            initial_soc=args.initial_soc,
+            final_soc_min=args.final_soc_min,
+            is_flying_lap=USE_FLYING_LAP,
+            per_lap_final_soc_min=args.per_lap_final_soc_min,
+            lap_grip_scales=lap_grip_scales,
+        )
     
     # =========================================================================
     print("\n" + "="*70)
@@ -308,18 +243,12 @@ def main(args):
     n_laps = max(1, int(getattr(optimal_trajectory, "n_laps", 1)))
     total_time_no_ers = velocity_profile_no_ers.lap_time * n_laps
     total_time_with_ers = velocity_profile_with_ers.lap_time * n_laps
-    total_time_optimal = (
-        pit_recommendation.best_candidate.total_time_s
-        if pit_recommendation is not None
-        else optimal_trajectory.lap_time
-    )
-    total_time_optimal_drive_only = optimal_trajectory.lap_time
+    total_time_optimal = optimal_trajectory.lap_time
     improvement = total_time_no_ers - total_time_optimal
     improvement_pct = (improvement / total_time_no_ers * 100.0) if total_time_no_ers > 1e-9 else 0.0
-    gap_to_theoretical = total_time_optimal_drive_only - total_time_with_ers
+    gap_to_theoretical = total_time_optimal - total_time_with_ers
     lap_breakdown = _format_multi_lap_breakdown(optimal_trajectory)
     lap_grip_block = _format_lap_grip_scales(lap_grip_scales)
-    pit_block = _format_pit_recommendation_table(pit_recommendation)
     
     summary_text = f"""
         {'='*70}
@@ -339,7 +268,6 @@ def main(args):
         Total Time (No ERS):    {total_time_no_ers:.3f} s
         Total Time (With ERS):  {total_time_with_ers:.3f} s
         Total Time (Optimal):   {total_time_optimal:.3f} s
-        Drive Time (No Pit):    {total_time_optimal_drive_only:.3f} s
         Avg Lap (Optimal):      {total_time_optimal / n_laps:.3f} s
         
         Improvement vs No ERS:  {improvement:.3f} s ({improvement_pct:.2f}%)
@@ -365,7 +293,6 @@ def main(args):
 
 {lap_breakdown if lap_breakdown else ""}
 {lap_grip_block if lap_grip_block else ""}
-{pit_block if pit_block else ""}
         {'='*70}
     """
     
@@ -382,13 +309,9 @@ def main(args):
         velocity_profile_no_ers,
         track,
         args,
-        pit_recommendation=pit_recommendation.to_dict() if pit_recommendation is not None else None,
         lap_grip_scales=lap_grip_scales,
-        total_time_optimal_override=total_time_optimal,
     )
     run_manager.save_json(results_dict, 'results_summary')
-    if pit_recommendation is not None:
-        run_manager.save_json(pit_recommendation.to_dict(), 'pit_recommendation')
     
     # Save numpy arrays for detailed analysis
     run_manager.save_numpy(optimal_trajectory.s, 'distance')

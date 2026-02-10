@@ -1,5 +1,4 @@
 from .ers import ERSConfig, ERSConfigQualifying, ERSConfigRace, get_ers_config
-from .pit import PIT_LOSS_DEFAULTS_S, get_default_pit_loss
 from .vehicle import VehicleConfig, TireParameters, get_vehicle_config
 
 def get_default_config() -> tuple:
@@ -34,6 +33,4 @@ __all__ = [
     'get_track_config',
     'get_vehicle_config',
     'get_ers_config',
-    'PIT_LOSS_DEFAULTS_S',
-    'get_default_pit_loss',
 ]
