@@ -10,3 +10,10 @@ __all__ = [
     'AlwaysDeployStrategy',
     'SmartRuleBasedStrategy',
 ]
+
+try:
+    from .rl_strategy import RLERSStrategy
+    __all__.append('RLERSStrategy')
+except Exception:
+    # Keep baseline strategies importable when optional RL deps are missing.
+    pass
