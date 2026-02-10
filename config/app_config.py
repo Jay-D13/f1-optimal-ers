@@ -18,6 +18,11 @@ class AppConfig:
     laps: int = 1
     per_lap_final_soc_min: float | None = None
     enable_tire_degradation: bool = False
+    tire_model: Literal["scalar", "dynamic"] = "scalar"
+    tire_compound: Literal["soft", "medium", "hard"] = "medium"
+    ambient_temp_c: float = 25.0
+    track_temp_c: float = 35.0
+    tire_init_temp_c: float = 80.0
     tire_wear_rate_per_lap: float = 0.012
     tire_min_grip_scale: float = 0.88
     use_tumftm: bool = False
