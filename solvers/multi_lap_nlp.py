@@ -31,6 +31,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         final_soc_min: float = 0.3,
         is_flying_lap: bool = True,
         per_lap_final_soc_min: float | None = None,
+        lap_grip_scales: np.ndarray | None = None,
     ) -> OptimalTrajectory:
         """
         Solve a multi-lap ERS optimal control problem.
@@ -42,9 +43,17 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
             final_soc_min: Final SOC lower bound at end of last lap.
             is_flying_lap: If True, enforce V_start == V_end over the full horizon.
             per_lap_final_soc_min: Optional SOC floor at each lap boundary.
+            lap_grip_scales: Optional per-lap grip multipliers (shape [n_laps]).
         """
         if n_laps < 1:
             raise ValueError("n_laps must be >= 1")
+        lap_grip_scales_arr: np.ndarray | None = None
+        if lap_grip_scales is not None:
+            lap_grip_scales_arr = np.asarray(lap_grip_scales, dtype=float).reshape(-1)
+            if lap_grip_scales_arr.shape[0] != n_laps:
+                raise ValueError("lap_grip_scales must have length n_laps")
+            if np.any(lap_grip_scales_arr <= 0.0):
+                raise ValueError("lap_grip_scales values must be > 0")
         if n_laps == 1:
             return super().solve(
                 v_limit_profile=v_limit_profile,
@@ -74,6 +83,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
                 final_soc_min=final_soc_min,
                 is_flying_lap=is_flying_lap,
                 per_lap_final_soc_min=per_lap_final_soc_min,
+                lap_grip_scales=lap_grip_scales_arr,
             )
             trajectory.solve_time = time.time() - start_time
 
@@ -104,6 +114,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         final_soc_min: float,
         is_flying_lap: bool,
         per_lap_final_soc_min: float | None,
+        lap_grip_scales: np.ndarray | None,
     ) -> OptimalTrajectory:
         """Build and solve the multi-lap CasADi optimization problem."""
         opti = ca.Opti()
@@ -114,6 +125,9 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         track_data = self.track.track_data
         gradient_arr = np.resize(track_data.gradient, self.N + 1)
         radius_arr = np.resize(track_data.radius, self.N + 1)
+        degradation_enabled = lap_grip_scales is not None
+        if lap_grip_scales is None:
+            lap_grip_scales = np.ones(n_laps, dtype=float)
 
         n_intervals_total = self.N * n_laps
         s_grid_total = np.linspace(
@@ -147,6 +161,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         for i in range(n_intervals_total):
             lap_idx = i // self.N
             k = i % self.N
+            grip_scale = float(lap_grip_scales[lap_idx])
 
             if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
                 v_k_safe = ca.fmax(V[i], 1.0)
@@ -178,8 +193,8 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
                 ers,
             )
 
-            opti.subject_to(F_prop_k - F_brake_k <= F_grip_k)
-            opti.subject_to(F_prop_k - F_brake_k >= -F_grip_k)
+            opti.subject_to(F_prop_k - F_brake_k <= F_grip_k * grip_scale)
+            opti.subject_to(F_prop_k - F_brake_k >= -F_grip_k * grip_scale)
 
             if self.collocation_method == CollocationMethod.EULER:
                 opti.subject_to(V[i + 1] == V[i] + self.ds * dv_ds_k)
@@ -200,8 +215,8 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
                 )
 
                 if i == n_intervals_total - 1:
-                    opti.subject_to(F_prop_k1 - F_brake_k1 <= F_grip_k1)
-                    opti.subject_to(F_prop_k1 - F_brake_k1 >= -F_grip_k1)
+                    opti.subject_to(F_prop_k1 - F_brake_k1 <= F_grip_k1 * grip_scale)
+                    opti.subject_to(F_prop_k1 - F_brake_k1 >= -F_grip_k1 * grip_scale)
 
                 opti.subject_to(V[i + 1] == V[i] + (self.ds / 2.0) * (dv_ds_k + dv_ds_k1))
                 opti.subject_to(SOC[i + 1] == SOC[i] + (self.ds / 2.0) * (dsoc_ds_k + dsoc_ds_k1))
@@ -221,8 +236,8 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
                 )
 
                 if i == n_intervals_total - 1:
-                    opti.subject_to(F_prop_k1 - F_brake_k1 <= F_grip_k1)
-                    opti.subject_to(F_prop_k1 - F_brake_k1 >= -F_grip_k1)
+                    opti.subject_to(F_prop_k1 - F_brake_k1 <= F_grip_k1 * grip_scale)
+                    opti.subject_to(F_prop_k1 - F_brake_k1 >= -F_grip_k1 * grip_scale)
 
                 v_mid_hermite = 0.5 * (V[i] + V[i + 1]) + (self.ds / 8.0) * (dv_ds_k - dv_ds_k1)
                 soc_mid_hermite = 0.5 * (SOC[i] + SOC[i + 1]) + (self.ds / 8.0) * (dsoc_ds_k - dsoc_ds_k1)
@@ -246,8 +261,8 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
                     ers,
                 )
 
-                opti.subject_to(F_prop_mid - F_brake_mid <= F_grip_mid)
-                opti.subject_to(F_prop_mid - F_brake_mid >= -F_grip_mid)
+                opti.subject_to(F_prop_mid - F_brake_mid <= F_grip_mid * grip_scale)
+                opti.subject_to(F_prop_mid - F_brake_mid >= -F_grip_mid * grip_scale)
 
                 opti.subject_to(V[i + 1] == V[i] + (self.ds / 6.0) * (dv_ds_k + 4.0 * dv_ds_mid + dv_ds_k1))
                 opti.subject_to(
@@ -277,10 +292,16 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
             opti.subject_to(lap_deployment[lap_idx] <= ers.deployment_limit_per_lap)
             opti.subject_to(lap_recovery[lap_idx] <= ers.recovery_limit_per_lap)
 
-        v_limit_nodes = np.concatenate([np.tile(v_limit_profile[:-1], n_laps), [v_limit_profile[-1]]])
+        v_limit_nodes = np.concatenate(
+            [
+                *(v_limit_profile[:-1] * np.sqrt(lap_grip_scales[lap_idx]) for lap_idx in range(n_laps)),
+                [v_limit_profile[-1] * np.sqrt(lap_grip_scales[-1])],
+            ]
+        )
+        v_limit_scale = 1.00 if degradation_enabled else 1.02
 
         opti.subject_to(opti.bounded(ers.min_soc, SOC, ers.max_soc))
-        opti.subject_to(opti.bounded(5.0, V, v_limit_nodes * 1.02))
+        opti.subject_to(opti.bounded(5.0, V, v_limit_nodes * v_limit_scale))
         opti.subject_to(opti.bounded(0, THROTTLE, 1))
         opti.subject_to(opti.bounded(0, BRAKE, 1))
 
@@ -291,8 +312,10 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
 
         if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
             v_limit_mid_single = 0.5 * (v_limit_profile[:-1] + v_limit_profile[1:])
-            v_limit_mid = np.tile(v_limit_mid_single, n_laps)
-            opti.subject_to(opti.bounded(5.0, V_MID, v_limit_mid * 1.02))
+            v_limit_mid = np.concatenate(
+                [v_limit_mid_single * np.sqrt(lap_grip_scales[lap_idx]) for lap_idx in range(n_laps)]
+            )
+            opti.subject_to(opti.bounded(5.0, V_MID, v_limit_mid * v_limit_scale))
             opti.subject_to(opti.bounded(ers.min_soc, SOC_MID, ers.max_soc))
 
         # =================================================================
@@ -300,7 +323,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         # =================================================================
         self._configure_solver(opti)
 
-        v_guess = np.concatenate([np.tile(v_limit_profile[:-1], n_laps), [v_limit_profile[-1]]]) * 0.95
+        v_guess = v_limit_nodes * 0.95
         soc_target = max(final_soc_min, per_lap_final_soc_min or ers.min_soc)
         soc_guess = np.linspace(initial_soc, soc_target, n_intervals_total + 1)
         opti.set_initial(V, v_guess)
@@ -311,7 +334,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         opti.set_initial(P_HARVEST, np.zeros(n_intervals_total))
 
         if self.collocation_method == CollocationMethod.HERMITE_SIMPSON:
-            v_mid_guess = np.tile(0.5 * (v_limit_profile[:-1] + v_limit_profile[1:]), n_laps) * 0.95
+            v_mid_guess = v_limit_mid * 0.95
             soc_mid_guess = 0.5 * (soc_guess[:-1] + soc_guess[1:])
             opti.set_initial(V_MID, v_mid_guess)
             opti.set_initial(SOC_MID, soc_mid_guess)
@@ -378,4 +401,5 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
             lap_energy_recovered=lap_energy_recovered,
             lap_start_soc=lap_start_soc,
             lap_end_soc=lap_end_soc,
+            lap_grip_scales=lap_grip_scales,
         )

@@ -17,6 +17,14 @@ class AppConfig:
     ds: float = 5.0
     laps: int = 1
     per_lap_final_soc_min: float | None = None
+    enable_tire_degradation: bool = False
+    tire_wear_rate_per_lap: float = 0.012
+    tire_min_grip_scale: float = 0.88
+    recommend_pit_stop: bool = False
+    pit_loss_time: float | None = None
+    pit_window_start_lap: int = 3
+    pit_window_end_lap: int | None = None
+    pit_eval_step_lap: int = 1
     use_tumftm: bool = False
     plot: bool = True
     save_animation: bool = False

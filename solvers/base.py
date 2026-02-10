@@ -38,6 +38,7 @@ class OptimalTrajectory:
     lap_energy_recovered: Optional[np.ndarray] = None
     lap_start_soc: Optional[np.ndarray] = None
     lap_end_soc: Optional[np.ndarray] = None
+    lap_grip_scales: Optional[np.ndarray] = None
 
     def get_reference_at_distance(self, distance: float) -> Dict:
         """reference values at given distance (with lap wrapping)."""
@@ -82,6 +83,8 @@ class OptimalTrajectory:
             stats['lap_start_soc'] = self.lap_start_soc
         if self.lap_end_soc is not None:
             stats['lap_end_soc'] = self.lap_end_soc
+        if self.lap_grip_scales is not None:
+            stats['lap_grip_scales'] = self.lap_grip_scales
 
         return stats
 

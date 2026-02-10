@@ -15,6 +15,11 @@ from .spatial_nlp import (
 from .multi_lap_nlp import (
     MultiLapSpatialNLPSolver,
 )
+from .pit_stop_recommender import (
+    PitRecommendationResult,
+    PitStrategyCandidate,
+    recommend_one_stop_pit,
+)
 
 # from .lap_time_map import (
 #     LapTimeMapGenerator,
@@ -35,6 +40,9 @@ __all__ = [
     # Offline optimization
     'SpatialNLPSolver',
     'MultiLapSpatialNLPSolver',
+    'PitStrategyCandidate',
+    'PitRecommendationResult',
+    'recommend_one_stop_pit',
     
     # Race strategy
     # 'LapTimeMapGenerator',
