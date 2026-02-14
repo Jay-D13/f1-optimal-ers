@@ -115,21 +115,43 @@ mkdir -p data/cache
 
 ## Quick Start
 
-### Run the optimizer on Monaco (default)
+### 1. Unified Startup (Recommended)
+
+Run the full stack (Backend + Frontend) with a single command:
+
+```bash
+./start.sh
+```
+
+This will launch:
+-   **Frontend**: http://localhost:5173
+-   **Backend**: http://localhost:8000
+
+**Optional Arguments:**
+You can configure the ports if needed:
+```bash
+./start.sh --backend-port 8001 --frontend-port 3000
+```
+
+### 2. Manual CLI Usage
+
+If you only want to run the optimization core (without the web UI), you can use the CLI directly:
+
+#### Run the optimizer on Monaco (default)
 
 ```bash
 uv run python main.py --track Monaco --plot
 ```
 
-### Run with animation output
+#### Run with animation output
 
 ```bash
 uv run python main.py --track Monaco --plot --save-animation
 ```
 
-NOTE: Saving animations is slow due to GIF encoding. And also right now the animation speed of the car around the track is not in sync (it's fixed speed for now).
+NOTE: Saving animations is slow due to GIF encoding.
 
-### Compare 2025 vs 2026 regulations
+#### Compare 2025 vs 2026 regulations
 
 ```bash
 # 2025 regulations (120kW ERS)
@@ -139,7 +161,7 @@ uv run python main.py --track Monza --regulations 2025 --plot
 uv run python main.py --track Monza --regulations 2026 --plot
 ```
 
-### Run multi-lap NLP race strategy
+#### Run multi-lap NLP race strategy
 
 ```bash
 # 10-lap horizon with final and per-lap SOC constraints

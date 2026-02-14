@@ -1,0 +1,33 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+:root {
+  --retro-bg: #FDFBF7;
+  --retro-text: #2A2A2A;
+  --retro-border: #4A4A4A;
+}
+
+.dark {
+  --retro-bg: #15151E;
+  --retro-text: #F1F2F3;
+  --retro-border: #6B7280;
+}
+
+@layer base {
+  body {
+    @apply bg-retro-bg text-retro-text antialiased transition-colors duration-200;
+  }
+}
+
+/* Custom Scrollbar for Retro Feel */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-retro-border/20 rounded-full hover:bg-retro-border/40 transition-colors;
+}

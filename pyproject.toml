@@ -14,4 +14,6 @@ dependencies = [
   "plotly>=5.14.0",
   "jupyter>=1.0.0",
   "tqdm>=4.65.0",
+  "fastapi>=0.129.0",
+  "uvicorn>=0.40.0",
 ]
