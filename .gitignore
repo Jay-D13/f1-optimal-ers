@@ -12,3 +12,4 @@ wheels/
 
 data/cache/
 results/
+node_modules/

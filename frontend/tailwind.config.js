@@ -18,11 +18,16 @@ export default {
           bg: 'var(--retro-bg)',
           text: 'var(--retro-text)',
           border: 'var(--retro-border)',
+        },
+        panel: {
+          bg: 'var(--panel-bg)',
+          muted: 'var(--panel-muted)',
+          border: 'var(--panel-border)',
         }
       },
       fontFamily: {
         mono: ['"Space Mono"', 'monospace'],
-        sans: ['Inter', 'sans-serif'],
+        sans: ['"IBM Plex Sans"', 'Inter', 'sans-serif'],
       }
     },
   },

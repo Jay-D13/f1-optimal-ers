@@ -30,6 +30,17 @@ class AppConfig:
     nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto"
     ipopt_linear_solver: str = "mumps"
     ipopt_hessian: Literal["limited-memory", "exact"] = "limited-memory"
+    vehicle_mass: float | None = None
+    vehicle_c_w_a: float | None = None
+    vehicle_c_z_a_f: float | None = None
+    vehicle_c_z_a_r: float | None = None
+    vehicle_f_roll: float | None = None
+    tire_fz_0: float | None = None
+    tire_mux_f: float | None = None
+    tire_muy_f: float | None = None
+    tire_mux_r: float | None = None
+    tire_muy_r: float | None = None
+    tire_model_exp: float | None = None
     regulations: Literal["2025", "2026"] = "2025"
 
 
@@ -73,6 +84,17 @@ def cli(
     nlp_solver: Annotated[str, typer.Option(help="NLP backend: auto, ipopt, fatrop, sqpmethod")] = "auto",
     ipopt_linear_solver: Annotated[str, typer.Option(help="Ipopt linear solver (e.g. mumps, ma97)")] = "mumps",
     ipopt_hessian: Annotated[str, typer.Option(help="Ipopt Hessian: limited-memory or exact")] = "limited-memory",
+    vehicle_mass: Annotated[Optional[float], typer.Option(help="Override vehicle mass [kg]")] = None,
+    vehicle_c_w_a: Annotated[Optional[float], typer.Option(help="Override Cd*A drag term [m^2]")] = None,
+    vehicle_c_z_a_f: Annotated[Optional[float], typer.Option(help="Override front downforce term [m^2]")] = None,
+    vehicle_c_z_a_r: Annotated[Optional[float], typer.Option(help="Override rear downforce term [m^2]")] = None,
+    vehicle_f_roll: Annotated[Optional[float], typer.Option(help="Override rolling resistance coefficient")] = None,
+    tire_fz_0: Annotated[Optional[float], typer.Option(help="Override nominal tire load [N]")] = None,
+    tire_mux_f: Annotated[Optional[float], typer.Option(help="Override front longitudinal friction at nominal load")] = None,
+    tire_muy_f: Annotated[Optional[float], typer.Option(help="Override front lateral friction at nominal load")] = None,
+    tire_mux_r: Annotated[Optional[float], typer.Option(help="Override rear longitudinal friction at nominal load")] = None,
+    tire_muy_r: Annotated[Optional[float], typer.Option(help="Override rear lateral friction at nominal load")] = None,
+    tire_model_exp: Annotated[Optional[float], typer.Option(help="Override friction circle exponent")] = None,
 
     # ── Output ────────────────────────────────────────────────────
     plot: Annotated[bool, typer.Option("--plot/--no-plot", help="Generate visualisation plots")] = True,
@@ -97,6 +119,12 @@ def cli(
         "tire_min_grip_scale": tire_min_grip_scale, "solver": solver,
         "collocation": collocation, "nlp_solver": nlp_solver,
         "ipopt_linear_solver": ipopt_linear_solver, "ipopt_hessian": ipopt_hessian,
+        "vehicle_mass": vehicle_mass, "vehicle_c_w_a": vehicle_c_w_a,
+        "vehicle_c_z_a_f": vehicle_c_z_a_f, "vehicle_c_z_a_r": vehicle_c_z_a_r,
+        "vehicle_f_roll": vehicle_f_roll, "tire_fz_0": tire_fz_0,
+        "tire_mux_f": tire_mux_f, "tire_muy_f": tire_muy_f,
+        "tire_mux_r": tire_mux_r, "tire_muy_r": tire_muy_r,
+        "tire_model_exp": tire_model_exp,
         "plot": plot, "save_animation": save_animation,
     }
 

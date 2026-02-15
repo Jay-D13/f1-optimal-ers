@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-import os
 import sys
 
 # Add project root to sys.path to allow imports from main project
@@ -22,24 +21,91 @@ import pandas as pd
 import subprocess
 import json
 import fastf1
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
+import numpy as np
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 
 class SimulationRequest(BaseModel):
     track: str
-    year: int = 2024
-    laps: int = 1
-    regulations: str = "2025"
-    initial_soc: float = 0.5
-    final_soc_min: float = 0.3
-    per_lap_final_soc_min: Optional[float] = None
-    ds: float = 5.0
-    collocation: str = "euler"
-    nlp_solver: str = "auto"
+    year: int = Field(default=2024, ge=2018)
+    laps: int = Field(default=1, ge=1)
+    regulations: Literal["2025", "2026"] = "2025"
+    initial_soc: float = Field(default=0.5, ge=0.0, le=1.0)
+    final_soc_min: float = Field(default=0.3, ge=0.0, le=1.0)
+    per_lap_final_soc_min: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    ds: float = Field(default=5.0, gt=0.0)
+    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
+    nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto"
+    flying_lap: bool = True
+    enable_tire_degradation: bool = False
+    tire_wear_rate_per_lap: float = Field(default=0.012, ge=0.0)
+    tire_min_grip_scale: float = Field(default=0.88, gt=0.0, le=1.0)
+    ipopt_linear_solver: str = "mumps"
+    ipopt_hessian: Literal["limited-memory", "exact"] = "limited-memory"
+    vehicle_mass: Optional[float] = Field(default=None, gt=0.0)
+    vehicle_c_w_a: Optional[float] = Field(default=None, gt=0.0)
+    vehicle_c_z_a_f: Optional[float] = Field(default=None, ge=0.0)
+    vehicle_c_z_a_r: Optional[float] = Field(default=None, ge=0.0)
+    vehicle_f_roll: Optional[float] = Field(default=None, ge=0.0)
+    tire_fz_0: Optional[float] = Field(default=None, gt=0.0)
+    tire_mux_f: Optional[float] = Field(default=None, gt=0.0)
+    tire_muy_f: Optional[float] = Field(default=None, gt=0.0)
+    tire_mux_r: Optional[float] = Field(default=None, gt=0.0)
+    tire_muy_r: Optional[float] = Field(default=None, gt=0.0)
+    tire_model_exp: Optional[float] = Field(default=None, gt=0.0)
     use_tumftm: bool = False
     driver: Optional[str] = None
+
+
+def _build_simulation_command(req: SimulationRequest) -> list[str]:
+    cmd = [
+        "uv", "run", "python", "main.py",
+        "--track", req.track,
+        "--year", str(req.year),
+        "--laps", str(req.laps),
+        "--regulations", req.regulations,
+        "--initial-soc", str(req.initial_soc),
+        "--final-soc-min", str(req.final_soc_min),
+        "--ds", str(req.ds),
+        "--collocation", req.collocation,
+        "--nlp-solver", req.nlp_solver,
+        "--ipopt-linear-solver", req.ipopt_linear_solver,
+        "--ipopt-hessian", req.ipopt_hessian,
+        "--tire-wear-rate-per-lap", str(req.tire_wear_rate_per_lap),
+        "--tire-min-grip-scale", str(req.tire_min_grip_scale),
+        "--flying-lap" if req.flying_lap else "--no-flying-lap",
+        "--enable-tire-degradation" if req.enable_tire_degradation else "--no-tire-degradation",
+    ]
+
+    if req.use_tumftm:
+        cmd.append("--use-tumftm")
+
+    if req.per_lap_final_soc_min is not None:
+        cmd.extend(["--per-lap-final-soc-min", str(req.per_lap_final_soc_min)])
+
+    if req.driver:
+        cmd.extend(["--driver", req.driver])
+
+    optional_overrides: dict[str, float | None] = {
+        "--vehicle-mass": req.vehicle_mass,
+        "--vehicle-c-w-a": req.vehicle_c_w_a,
+        "--vehicle-c-z-a-f": req.vehicle_c_z_a_f,
+        "--vehicle-c-z-a-r": req.vehicle_c_z_a_r,
+        "--vehicle-f-roll": req.vehicle_f_roll,
+        "--tire-fz-0": req.tire_fz_0,
+        "--tire-mux-f": req.tire_mux_f,
+        "--tire-muy-f": req.tire_muy_f,
+        "--tire-mux-r": req.tire_mux_r,
+        "--tire-muy-r": req.tire_muy_r,
+        "--tire-model-exp": req.tire_model_exp,
+    }
+    for flag, value in optional_overrides.items():
+        if value is not None:
+            cmd.extend([flag, str(value)])
+
+    return cmd
 
 # Configure FastF1 cache
 CACHE_DIR = DATA_DIR / "cache"
@@ -181,7 +247,6 @@ async def get_raceline(track_id: str, type: str = "tumftm"):
             
             # Let's inspect racelines in next step if this fails, but for now assume standard csv
             # We'll use numpy to be safer if it has comments
-            import numpy as np
             arr = np.loadtxt(csv_path, delimiter=',', comments='#')
             
             points = []
@@ -197,29 +262,7 @@ async def get_raceline(track_id: str, type: str = "tumftm"):
 @app.post("/simulation")
 async def run_simulation(req: SimulationRequest):
     """Run the offline simulation."""
-    cmd = [
-        "uv", "run", "python", "main.py",
-        "--track", req.track,
-        "--laps", str(req.laps),
-        "--regulations", req.regulations,
-        "--initial-soc", str(req.initial_soc),
-        "--final-soc-min", str(req.final_soc_min),
-        "--ds", str(req.ds),
-        "--collocation", req.collocation,
-        "--nlp-solver", req.nlp_solver,
-    ]
-    
-    if req.use_tumftm:
-        cmd.append("--use-tumftm")
-        
-    if req.per_lap_final_soc_min:
-        cmd.extend(["--per-lap-final-soc-min", str(req.per_lap_final_soc_min)])
-        
-    if req.driver:
-        cmd.extend(["--driver", req.driver])
-        
-    if req.year:
-        cmd.extend(["--year", str(req.year)])
+    cmd = _build_simulation_command(req)
     
     # We want JSON output. The main.py saves to `results/track/timestamp/data/results_summary.json`.
     # We need to capture the output directory from stdout or just look for the most recent one.
@@ -232,7 +275,8 @@ async def run_simulation(req: SimulationRequest):
         if process.returncode != 0:
             return {"status": "error", "message": process.stderr, "stdout": process.stdout}
             
-        results_dir = DATA_DIR.parent / "results" / req.track
+        # Fix: Ensure track name is lowercase to match RunManager's behavior
+        results_dir = DATA_DIR.parent / "results" / req.track.lower()
         if not results_dir.exists():
              return {"status": "error", "message": "Results directory not found", "stdout": process.stdout}
         
@@ -254,3 +298,40 @@ async def run_simulation(req: SimulationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/simulation/{track}/{run_id}/data")
+async def get_simulation_data(track: str, run_id: str):
+    """Get detailed simulation data for visualization."""
+    try:
+        data_dir = DATA_DIR.parent / "results" / track.lower() / run_id / "data"
+        if not data_dir.exists():
+            raise HTTPException(status_code=404, detail="Run data not found")
+        
+        # Load required numpy files
+        # We need: s (distance), v_opt (velocity), soc_opt (SOC), P_ers_opt (power), t_opt (time if available, else construct)
+        
+        try:
+            s = np.load(data_dir / "distance.npy")
+            t = np.load(data_dir / "time.npy")
+            v = np.load(data_dir / "velocity_optimal.npy")
+            soc = np.load(data_dir / "soc_optimal.npy")
+            power = np.load(data_dir / "ers_power.npy")
+            throttle = np.load(data_dir / "throttle.npy")
+            brake = np.load(data_dir / "brake.npy")
+        except FileNotFoundError:
+             raise HTTPException(status_code=404, detail="Essential data files missing")
+
+        # Construct response
+        # We'll return arrays as lists
+        return {
+            "s": s.tolist(),
+            "t": t.tolist(),
+            "v": v.tolist(),
+            "soc": soc.tolist(),
+            "power": power.tolist(),
+            "throttle": throttle.tolist(),
+            "brake": brake.tolist()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

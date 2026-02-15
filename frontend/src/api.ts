@@ -20,9 +20,26 @@ export interface SimulationParams {
     initial_soc: number;
     final_soc_min: number;
     per_lap_final_soc_min?: number;
+    flying_lap: boolean;
+    enable_tire_degradation: boolean;
+    tire_wear_rate_per_lap: number;
+    tire_min_grip_scale: number;
     ds: number;
     collocation: 'euler' | 'trapezoidal' | 'hermite_simpson';
-    nlp_solver: 'auto' | 'ipopt' | 'fatrop';
+    nlp_solver: 'auto' | 'ipopt' | 'fatrop' | 'sqpmethod';
+    ipopt_linear_solver: string;
+    ipopt_hessian: 'limited-memory' | 'exact';
+    vehicle_mass?: number;
+    vehicle_c_w_a?: number;
+    vehicle_c_z_a_f?: number;
+    vehicle_c_z_a_r?: number;
+    vehicle_f_roll?: number;
+    tire_fz_0?: number;
+    tire_mux_f?: number;
+    tire_muy_f?: number;
+    tire_mux_r?: number;
+    tire_muy_r?: number;
+    tire_model_exp?: number;
     use_tumftm: boolean;
     driver?: string;
 }
@@ -85,5 +102,13 @@ export const api = {
         const res = await fetch(`${API_URL}/fastf1/drivers/${year}/${location}`);
         const data = await res.json();
         return data.drivers as FastF1Driver[];
+    },
+
+    getSimulationData: async (track: string, runId: string) => {
+        const res = await fetch(`${API_URL}/simulation/${track}/${runId}/data`);
+        if (!res.ok) {
+            throw new Error('Failed to fetch simulation data');
+        }
+        return await res.json();
     }
 };

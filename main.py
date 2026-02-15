@@ -15,6 +15,7 @@ from models import F1TrackModel, VehicleDynamicsModel
 from config import (
     ERSConfig,
     VehicleConfig,
+    TireParameters,
     get_vehicle_config,
     get_ers_config,
 )
@@ -67,6 +68,28 @@ def main(args):
         raise ValueError("--tire_wear_rate_per_lap must be >= 0")
     if not (0.0 < args.tire_min_grip_scale <= 1.0):
         raise ValueError("--tire_min_grip_scale must be in (0, 1]")
+    if args.vehicle_mass is not None and args.vehicle_mass <= 0:
+        raise ValueError("--vehicle_mass must be > 0")
+    if args.vehicle_c_w_a is not None and args.vehicle_c_w_a <= 0:
+        raise ValueError("--vehicle_c_w_a must be > 0")
+    if args.vehicle_c_z_a_f is not None and args.vehicle_c_z_a_f < 0:
+        raise ValueError("--vehicle_c_z_a_f must be >= 0")
+    if args.vehicle_c_z_a_r is not None and args.vehicle_c_z_a_r < 0:
+        raise ValueError("--vehicle_c_z_a_r must be >= 0")
+    if args.vehicle_f_roll is not None and args.vehicle_f_roll < 0:
+        raise ValueError("--vehicle_f_roll must be >= 0")
+    if args.tire_fz_0 is not None and args.tire_fz_0 <= 0:
+        raise ValueError("--tire_fz_0 must be > 0")
+    if args.tire_mux_f is not None and args.tire_mux_f <= 0:
+        raise ValueError("--tire_mux_f must be > 0")
+    if args.tire_muy_f is not None and args.tire_muy_f <= 0:
+        raise ValueError("--tire_muy_f must be > 0")
+    if args.tire_mux_r is not None and args.tire_mux_r <= 0:
+        raise ValueError("--tire_mux_r must be > 0")
+    if args.tire_muy_r is not None and args.tire_muy_r <= 0:
+        raise ValueError("--tire_muy_r must be > 0")
+    if args.tire_model_exp is not None and args.tire_model_exp <= 0:
+        raise ValueError("--tire_model_exp must be > 0")
 
     print("="*70)
     print("  F1 ERS OPTIMAL CONTROL")
@@ -95,11 +118,48 @@ def main(args):
         lambda: VehicleConfig()
     )()
     vehicle_config = get_vehicle_config(args.regulations, base=vehicle_config)
+    tire_params = TireParameters()
+
+    vehicle_overrides = {
+        "mass": args.vehicle_mass,
+        "c_w_a": args.vehicle_c_w_a,
+        "c_z_a_f": args.vehicle_c_z_a_f,
+        "c_z_a_r": args.vehicle_c_z_a_r,
+        "f_roll": args.vehicle_f_roll,
+        "cr": args.vehicle_f_roll,
+    }
+    for field, value in vehicle_overrides.items():
+        if value is not None:
+            setattr(vehicle_config, field, value)
+
+    tire_overrides = {
+        "fz_0": args.tire_fz_0,
+        "mux_f": args.tire_mux_f,
+        "muy_f": args.tire_muy_f,
+        "mux_r": args.tire_mux_r,
+        "muy_r": args.tire_muy_r,
+        "tire_model_exp": args.tire_model_exp,
+    }
+    for field, value in tire_overrides.items():
+        if value is not None:
+            setattr(tire_params, field, value)
     
     print(f"\nTrack: {args.track}")
     print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
           f"{ers_config.battery_usable_energy/1e6:.1f}MJ/lap limit")
     print(f"Vehicle: Cd={vehicle_config.cd:.2f}, Cl={vehicle_config.cl:.2f}")
+    if any(value is not None for value in vehicle_overrides.values()):
+        print(
+            f"Vehicle overrides: mass={vehicle_config.mass:.1f}kg, "
+            f"c_w_a={vehicle_config.c_w_a:.3f}, c_z_a_f={vehicle_config.c_z_a_f:.3f}, "
+            f"c_z_a_r={vehicle_config.c_z_a_r:.3f}, f_roll={vehicle_config.f_roll:.4f}"
+        )
+    if any(value is not None for value in tire_overrides.values()):
+        print(
+            f"Tire overrides: mux_f={tire_params.mux_f:.3f}, muy_f={tire_params.muy_f:.3f}, "
+            f"mux_r={tire_params.mux_r:.3f}, muy_r={tire_params.muy_r:.3f}, "
+            f"fz_0={tire_params.fz_0:.1f}, exp={tire_params.tire_model_exp:.3f}"
+        )
     print(f"Collocation: {args.collocation}")
     print(f"Spatial step ds: {args.ds} m")
     print(f"Laps in NLP horizon: {args.laps}")
@@ -149,7 +209,7 @@ def main(args):
     print("CREATE MODELS")
     print("="*70)
     
-    vehicle_model = VehicleDynamicsModel(vehicle_config, ers_config)
+    vehicle_model = VehicleDynamicsModel(vehicle_config, ers_config, tire_params=tire_params)
     print("   ✓ Vehicle dynamics model ready")
     
 
@@ -312,6 +372,7 @@ def main(args):
     
     # Save numpy arrays for detailed analysis
     run_manager.save_numpy(optimal_trajectory.s, 'distance')
+    run_manager.save_numpy(optimal_trajectory.t_opt, 'time')
     run_manager.save_numpy(optimal_trajectory.v_opt, 'velocity_optimal')
     run_manager.save_numpy(velocity_profile_no_ers.v, 'velocity_no_ers')
     run_manager.save_numpy(velocity_profile_with_ers.v, 'velocity_with_ers')

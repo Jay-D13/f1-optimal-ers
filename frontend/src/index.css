@@ -5,17 +5,57 @@
   --retro-bg: #FDFBF7;
   --retro-text: #2A2A2A;
   --retro-border: #4A4A4A;
+  --panel-bg: #fffdf9;
+  --panel-muted: #f2efe8;
+  --panel-border: #d7d1c4;
+  --accent: #e10600;
+  --accent-soft: rgba(225, 6, 0, 0.12);
+  --ok: #15803d;
+  --warn: #b45309;
 }
 
 .dark {
   --retro-bg: #15151E;
   --retro-text: #F1F2F3;
   --retro-border: #6B7280;
+  --panel-bg: #1c1c27;
+  --panel-muted: #252534;
+  --panel-border: #4b5563;
+  --accent: #ff1801;
+  --accent-soft: rgba(255, 24, 1, 0.18);
+  --ok: #4ade80;
+  --warn: #fbbf24;
 }
 
 @layer base {
   body {
     @apply bg-retro-bg text-retro-text antialiased transition-colors duration-200;
+  }
+}
+
+.config-canvas {
+  background-image: none;
+  padding: 0.25rem 0;
+}
+
+.config-card {
+  animation: config-card-in 260ms ease-out;
+}
+
+@keyframes config-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .config-card {
+    animation: none;
   }
 }
 
