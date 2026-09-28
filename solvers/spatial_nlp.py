@@ -16,19 +16,45 @@ Problem Formulation:
         SOC dynamics from ERS power
         E_deploy, E_recover ≤ per-lap limits  (regulatory limits; running totals are states)
         SOC_min ≤ SOC ≤ SOC_max               (battery limits)
+        tyre temperatures and wear            (optional dynamic tyre model, multi-lap)
 """
 
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Tuple
 
 import casadi as ca
 import numpy as np
 
+from config import TireCompoundConfig, TireThermalConfig
+from models.tire_thermals import (
+    core_temp_rate_ca,
+    heat_generation_ca,
+    mu_scale_ca,
+    mu_scale_np,
+    surface_temp_rate_ca,
+    utilization_ca,
+    wear_rate_ca,
+)
 from solvers import BaseSolver, OptimalTrajectory, SolverError
 
 # Ipopt return statuses that count as a solution
 _SUCCESS_STATUS = {"Solve_Succeeded": "optimal", "Solved_To_Acceptable_Level": "acceptable"}
+
+# Dynamic tyre states: surface temperature, core temperature (°C) and wear (0-1), front then rear
+TIRE_STATES = ("TSF", "TCF", "WF", "TSR", "TCR", "WR")
+_WEAR_STATES = ("WF", "WR")
+
+
+@dataclass
+class DynamicTireSettings:
+    """Inputs of the dynamic tyre model, which adds tyre temperature and wear states to the NLP."""
+    thermal: TireThermalConfig
+    compound: TireCompoundConfig
+    ambient_temp_c: float
+    track_temp_c: float
+    init_temp_c: float
 
 
 def deploy_power_limit(v, ers):
@@ -148,10 +174,10 @@ class SpatialNLPSolver(BaseSolver):
     def _sample_on_grid(self, values: np.ndarray) -> np.ndarray:
         """Sample a per-lap profile at the NLP nodes. It is given on the track's points, or evenly spaced over the lap."""
         values = np.asarray(values, dtype=float)
-        track_data = self.track.track_data
-        if len(values) == track_data.n_points:
+        s_track = getattr(self.track.track_data, "s", None)
+        if s_track is not None and len(values) == len(s_track):
             # Track points stop short of the finish line, so wrap around the lap
-            return np.interp(self.s_grid, track_data.s, values, period=self.track.total_length)
+            return np.interp(self.s_grid, s_track, values, period=self.track.total_length)
         return np.interp(self.s_grid, np.linspace(0, self.track.total_length, len(values)), values)
 
     def _compute_derivatives(
@@ -205,6 +231,204 @@ class SpatialNLPSolver(BaseSolver):
         opti.subject_to(F_prop - F_brake <= F_grip * grip_scale)
         opti.subject_to(F_prop - F_brake >= -F_grip * grip_scale)
 
+    def _compute_axle_normal_loads(self, v, gradient, veh):
+        """Estimate front/rear axle normal loads with static + aero contribution."""
+        wb = veh.wheelbase
+        front_static_ratio = veh.lr / wb
+        rear_static_ratio = veh.lf / wb
+
+        F_weight = veh.mass * veh.g * ca.cos(gradient)
+        q = 0.5 * veh.rho_air * v**2
+        F_aero_f = q * veh.c_z_a_f
+        F_aero_r = q * veh.c_z_a_r
+
+        F_z_f = front_static_ratio * F_weight + F_aero_f
+        F_z_r = rear_static_ratio * F_weight + F_aero_r
+        return F_z_f, F_z_r
+
+    def _split_lateral_force_by_load(self, F_lat_total, F_z_f, F_z_r):
+        """Split lateral demand front/rear proportionally to axle normal loads."""
+        F_z_sum = ca.fmax(F_z_f + F_z_r, 1.0)
+        front_ratio = F_z_f / F_z_sum
+        rear_ratio = F_z_r / F_z_sum
+        return front_ratio * F_lat_total, rear_ratio * F_lat_total
+
+    def _compute_load_sensitive_mu(self, F_z, mu0: float, dmu_dfz: float):
+        tires = self.vehicle.tires
+        mu = mu0 + dmu_dfz * (F_z - tires.fz_0)
+        return ca.fmax(mu, 0.5)
+
+    def _compute_axle_force_potentials(self, F_z_f, F_z_r, mu_scale_f, mu_scale_r):
+        """Return axle force limits (Fx/Fy potentials) including load sensitivity."""
+        tires = self.vehicle.tires
+
+        mu_x_f = self._compute_load_sensitive_mu(F_z_f, tires.mux_f, tires.dmux_dfz_f) * mu_scale_f
+        mu_y_f = self._compute_load_sensitive_mu(F_z_f, tires.muy_f, tires.dmuy_dfz_f) * mu_scale_f
+        mu_x_r = self._compute_load_sensitive_mu(F_z_r, tires.mux_r, tires.dmux_dfz_r) * mu_scale_r
+        mu_y_r = self._compute_load_sensitive_mu(F_z_r, tires.muy_r, tires.dmuy_dfz_r) * mu_scale_r
+
+        F_x_max_f = ca.fmax(mu_x_f * F_z_f, 1.0)
+        F_y_max_f = ca.fmax(mu_y_f * F_z_f, 1.0)
+        F_x_max_r = ca.fmax(mu_x_r * F_z_r, 1.0)
+        F_y_max_r = ca.fmax(mu_y_r * F_z_r, 1.0)
+        return F_x_max_f, F_x_max_r, F_y_max_f, F_y_max_r
+
+    def _split_longitudinal_force(self, F_long):
+        """
+        Split net longitudinal tire force between axles.
+        Positive force (traction) is rear-biased, braking uses both axles with front bias.
+        """
+        sigma_acc = 0.5 * (1.0 + ca.tanh(F_long / 1000.0))
+        sigma_brk = 1.0 - sigma_acc
+
+        # F1 traction is heavily rear-biased; braking has front bias.
+        front_ratio = sigma_acc * 0.05 + sigma_brk * 0.60
+        rear_ratio = sigma_acc * 0.95 + sigma_brk * 0.40
+        return front_ratio * F_long, rear_ratio * F_long
+
+    def _compute_dynamic_quantities(
+        self,
+        v,
+        soc,
+        tsf,
+        tcf,
+        wf,
+        tsr,
+        tcr,
+        wr,
+        p_deploy,
+        p_harvest,
+        throttle,
+        brake,
+        gradient,
+        radius,
+        veh,
+        ers,
+        thermal_cfg: TireThermalConfig,
+        compound_cfg: TireCompoundConfig,
+        ambient_temp_c: float,
+        track_temp_c: float,
+    ):
+        """
+        Compute dynamics and dynamic tire constraints at one collocation state.
+        """
+        dv_ds, dsoc_ds, F_prop, F_brake, _ = self._compute_derivatives(
+            v,
+            soc,
+            p_deploy,
+            p_harvest,
+            throttle,
+            brake,
+            gradient,
+            radius,
+            veh,
+            ers,
+        )
+        v_safe = ca.fmax(v, 5.0)
+
+        # Axle loads and lateral demand split
+        F_z_f, F_z_r = self._compute_axle_normal_loads(v, gradient, veh)
+        safe_radius = ca.fmax(ca.fabs(radius), 15.0)
+        F_lat_total = veh.mass * v * v / safe_radius
+        F_y_f, F_y_r = self._split_lateral_force_by_load(F_lat_total, F_z_f, F_z_r)
+
+        mu_scale_f = mu_scale_ca(tcf, wf, thermal_cfg, compound_cfg)
+        mu_scale_r = mu_scale_ca(tcr, wr, thermal_cfg, compound_cfg)
+
+        F_x_max_f, F_x_max_r, F_y_max_f, F_y_max_r = self._compute_axle_force_potentials(
+            F_z_f, F_z_r, mu_scale_f, mu_scale_r
+        )
+
+        F_long = F_prop - F_brake
+        F_x_f, F_x_r = self._split_longitudinal_force(F_long)
+
+        p = thermal_cfg.utilization_ellipse_p
+        u_f = utilization_ca(F_x_f, F_y_f, F_x_max_f, F_y_max_f, p)
+        u_r = utilization_ca(F_x_r, F_y_r, F_x_max_r, F_y_max_r, p)
+
+        q_gen_f = heat_generation_ca(F_z_f, v_safe, u_f, thermal_cfg, compound_cfg)
+        q_gen_r = heat_generation_ca(F_z_r, v_safe, u_r, thermal_cfg, compound_cfg)
+
+        d_tsf_dt = surface_temp_rate_ca(q_gen_f, tsf, tcf, ambient_temp_c, track_temp_c, thermal_cfg)
+        d_tsr_dt = surface_temp_rate_ca(q_gen_r, tsr, tcr, ambient_temp_c, track_temp_c, thermal_cfg)
+
+        q_sc_f = thermal_cfg.k_surface_core * (tsf - tcf)
+        q_sc_r = thermal_cfg.k_surface_core * (tsr - tcr)
+        d_tcf_dt = core_temp_rate_ca(q_sc_f, tcf, ambient_temp_c, thermal_cfg)
+        d_tcr_dt = core_temp_rate_ca(q_sc_r, tcr, ambient_temp_c, thermal_cfg)
+
+        d_wf_dt = wear_rate_ca(u_f, tcf, F_z_f, thermal_cfg, compound_cfg)
+        d_wr_dt = wear_rate_ca(u_r, tcr, F_z_r, thermal_cfg, compound_cfg)
+
+        d_tsf_ds = d_tsf_dt / v_safe
+        d_tsr_ds = d_tsr_dt / v_safe
+        d_tcf_ds = d_tcf_dt / v_safe
+        d_tcr_ds = d_tcr_dt / v_safe
+        d_wf_ds = d_wf_dt / v_safe
+        d_wr_ds = d_wr_dt / v_safe
+
+        ratio_y_f = ca.fmin(ca.fabs(F_y_f) / ca.fmax(F_y_max_f, 1e-6), 0.999)
+        ratio_y_r = ca.fmin(ca.fabs(F_y_r) / ca.fmax(F_y_max_r, 1e-6), 0.999)
+        avail_ratio_f = ca.power(ca.fmax(1.0 - ca.power(ratio_y_f, p), 0.0), 1.0 / p)
+        avail_ratio_r = ca.power(ca.fmax(1.0 - ca.power(ratio_y_r, p), 0.0), 1.0 / p)
+        F_x_avail_f = F_x_max_f * avail_ratio_f
+        F_x_avail_r = F_x_max_r * avail_ratio_r
+
+        F_long_upper = 0.10 * F_x_avail_f + F_x_avail_r
+        F_long_lower = -(F_x_avail_f + F_x_avail_r)
+
+        mu_lat_scale_avg = (mu_scale_f * F_z_f + mu_scale_r * F_z_r) / ca.fmax(F_z_f + F_z_r, 1.0)
+
+        return {
+            "dv_ds": dv_ds,
+            "dsoc_ds": dsoc_ds,
+            "d_tsf_ds": d_tsf_ds,
+            "d_tsr_ds": d_tsr_ds,
+            "d_tcf_ds": d_tcf_ds,
+            "d_tcr_ds": d_tcr_ds,
+            "d_wf_ds": d_wf_ds,
+            "d_wr_ds": d_wr_ds,
+            "F_long": F_long,
+            "F_long_upper": F_long_upper,
+            "F_long_lower": F_long_lower,
+            "mu_lat_scale_avg": mu_lat_scale_avg,
+        }
+
+    def _point_dynamics(self, opti, x, u, gradient, radius, v_limit, grip_scale, tire, add_constraints):
+        """
+        State derivatives d/ds at one collocation point, keyed like the states.
+
+        With add_constraints, also adds the point's grip limits: the friction limit on the net
+        longitudinal force, or with dynamic tyres the per-axle limits and a cornering-speed limit
+        scaled by the tyres' current grip.
+        """
+        veh = self.vehicle.vehicle
+        ers = self.vehicle.ers
+        p_deploy, p_harvest, throttle, brake = u
+
+        if tire is None:
+            dv_ds, dsoc_ds, F_prop, F_brake, F_grip = self._compute_derivatives(
+                x["V"], x["SOC"], p_deploy, p_harvest, throttle, brake, gradient, radius, veh, ers
+            )
+            if add_constraints:
+                self._add_grip_limit(opti, F_prop, F_brake, F_grip, grip_scale)
+            return {"V": dv_ds, "SOC": dsoc_ds}
+
+        q = self._compute_dynamic_quantities(
+            x["V"], x["SOC"], x["TSF"], x["TCF"], x["WF"], x["TSR"], x["TCR"], x["WR"],
+            p_deploy, p_harvest, throttle, brake, gradient, radius, veh, ers,
+            tire.thermal, tire.compound, tire.ambient_temp_c, tire.track_temp_c,
+        )
+        if add_constraints:
+            opti.subject_to(q["F_long"] <= q["F_long_upper"])
+            opti.subject_to(q["F_long"] >= q["F_long_lower"])
+            opti.subject_to(x["V"] <= v_limit * ca.sqrt(ca.fmax(q["mu_lat_scale_avg"], 0.20)) * 1.02)
+        return {
+            "V": q["dv_ds"], "SOC": q["dsoc_ds"],
+            "TSF": q["d_tsf_ds"], "TCF": q["d_tcf_ds"], "WF": q["d_wf_ds"],
+            "TSR": q["d_tsr_ds"], "TCR": q["d_tcr_ds"], "WR": q["d_wr_ds"],
+        }
+
     def _build_and_solve(
         self,
         v_limit_profile: np.ndarray,
@@ -214,12 +438,15 @@ class SpatialNLPSolver(BaseSolver):
         n_laps: int = 1,
         per_lap_final_soc_min: float | None = None,
         lap_grip_scales: np.ndarray | None = None,
+        tire: DynamicTireSettings | None = None,
     ) -> OptimalTrajectory:
-        """Build and solve the CasADi optimization problem over n_laps consecutive laps."""
+        """
+        Build and solve the CasADi optimization problem over n_laps consecutive laps.
+        With `tire`, tyre temperatures and wear are states that set the grip (dynamic tyre model).
+        """
         opti = ca.Opti()
 
         # Get vehicle parameters
-        veh = self.vehicle.vehicle
         ers = self.vehicle.ers
         PS = self.POWER_SCALE
         method = self.collocation_method
@@ -238,11 +465,18 @@ class SpatialNLPSolver(BaseSolver):
         # DECISION VARIABLES
         # =================================================================
 
-        # States at node points
-        V = opti.variable(n + 1)          # Velocity (m/s)
-        SOC = opti.variable(n + 1)        # State of Charge (0-1)
-        E_DEPLOY = opti.variable(n + 1)   # ERS energy deployed since the start (MJ)
-        E_RECOVER = opti.variable(n + 1)  # ERS energy recovered since the start (MJ)
+        # States at node points, integrated by the collocation scheme
+        X = {
+            "V": opti.variable(n + 1),    # Velocity (m/s)
+            "SOC": opti.variable(n + 1),  # State of Charge (0-1)
+        }
+        if tire is not None:
+            X.update({name: opti.variable(n + 1) for name in TIRE_STATES})
+        V, SOC = X["V"], X["SOC"]
+
+        # Running energy totals (MJ): states, so each constraint only couples neighbouring nodes
+        E_DEPLOY = opti.variable(n + 1)   # ERS energy deployed since the start
+        E_RECOVER = opti.variable(n + 1)  # ERS energy recovered since the start
 
         # Controls (piecewise constant over intervals)
         P_DEPLOY = opti.variable(n)       # ERS discharge power (≥0, units of POWER_SCALE)
@@ -252,8 +486,8 @@ class SpatialNLPSolver(BaseSolver):
 
         # For Hermite-Simpson: midpoint states
         if method == CollocationMethod.HERMITE_SIMPSON:
-            V_MID = opti.variable(n)      # Velocity at midpoints
-            SOC_MID = opti.variable(n)    # SOC at midpoints
+            X_MID = {name: opti.variable(n) for name in X}
+            V_MID = X_MID["V"]
 
         # =================================================================
         # OBJECTIVE, DYNAMICS & PHYSICS
@@ -264,8 +498,7 @@ class SpatialNLPSolver(BaseSolver):
         for i in range(n):
             k = i % self.N  # Node index within the lap
             grip_scale = float(lap_grip_scales[i // self.N])
-            p_deploy = P_DEPLOY[i] * PS
-            p_harvest = P_HARVEST[i] * PS
+            u = (P_DEPLOY[i] * PS, P_HARVEST[i] * PS, THROTTLE[i], BRAKE[i])  # Powers in W
 
             # --- Lap time ---
             if method == CollocationMethod.HERMITE_SIMPSON:
@@ -283,79 +516,64 @@ class SpatialNLPSolver(BaseSolver):
             # --- 2026 Regulation Logic (Speed Dependent Taper) ---
             opti.subject_to(P_DEPLOY[i] <= deploy_power_limit(V[i], ers) / PS)
 
-            # --- Compute derivatives at node k ---
-            dv_ds_k, dsoc_ds_k, F_prop_k, F_brake_k, F_grip_k = self._compute_derivatives(
-                V[i], SOC[i],
-                p_deploy, p_harvest, THROTTLE[i], BRAKE[i],
-                gradient_arr[k], radius_arr[k], veh, ers
+            # --- Derivatives and grip limits at node k ---
+            f_k = self._point_dynamics(
+                opti, {name: x[i] for name, x in X.items()}, u,
+                gradient_arr[k], radius_arr[k], v_limit_profile[k], grip_scale, tire, add_constraints=True,
             )
-
-            # --- Grip Limits at node k (Friction Circle) ---
-            self._add_grip_limit(opti, F_prop_k, F_brake_k, F_grip_k, grip_scale)
 
             # --- Apply collocation constraints ---
             # dt: time over the interval, integrated like the SOC (same 5 m/s speed floor as the dynamics)
             if method == CollocationMethod.EULER:
                 # Explicit Euler: x[k+1] = x[k] + h * f(x[k])
-                opti.subject_to(V[i + 1] == V[i] + self.ds * dv_ds_k)
-                opti.subject_to(SOC[i + 1] == SOC[i] + self.ds * dsoc_ds_k)
+                for name, x in X.items():
+                    opti.subject_to(x[i + 1] == x[i] + self.ds * f_k[name])
                 dt = self.ds / ca.fmax(V[i], 5.0)
 
             else:
-                # Compute derivatives at node k+1
-                dv_ds_k1, dsoc_ds_k1, F_prop_k1, F_brake_k1, F_grip_k1 = self._compute_derivatives(
-                    V[i + 1], SOC[i + 1],
-                    p_deploy, p_harvest, THROTTLE[i], BRAKE[i],  # Same control
-                    gradient_arr[k + 1], radius_arr[k + 1], veh, ers
+                # Derivatives at node k+1 (same control). Its grip limits are only added for the
+                # final node; the others are added when they become node k.
+                f_k1 = self._point_dynamics(
+                    opti, {name: x[i + 1] for name, x in X.items()}, u,
+                    gradient_arr[k + 1], radius_arr[k + 1], v_limit_profile[k + 1], grip_scale, tire,
+                    add_constraints=(i == n - 1),
                 )
-
-                # Grip limits at k+1: only add for the final node (others handled when they become k)
-                if i == n - 1:
-                    self._add_grip_limit(opti, F_prop_k1, F_brake_k1, F_grip_k1, grip_scale)
 
                 if method == CollocationMethod.TRAPEZOIDAL:
                     # Trapezoidal: x[k+1] = x[k] + (h/2) * (f(x[k]) + f(x[k+1]))
-                    opti.subject_to(V[i + 1] == V[i] + (self.ds / 2.0) * (dv_ds_k + dv_ds_k1))
-                    opti.subject_to(SOC[i + 1] == SOC[i] + (self.ds / 2.0) * (dsoc_ds_k + dsoc_ds_k1))
+                    for name, x in X.items():
+                        opti.subject_to(x[i + 1] == x[i] + (self.ds / 2.0) * (f_k[name] + f_k1[name]))
                     dt = (self.ds / 2.0) * (1.0 / ca.fmax(V[i], 5.0) + 1.0 / ca.fmax(V[i + 1], 5.0))
 
                 else:
-                    # 1. Midpoint state from Hermite interpolation
+                    # 1. Midpoint states from Hermite interpolation
                     # x_mid = (x[k] + x[k+1])/2 + (h/8) * (f[k] - f[k+1])
-                    v_mid_hermite = 0.5 * (V[i] + V[i + 1]) + (self.ds / 8.0) * (dv_ds_k - dv_ds_k1)
-                    soc_mid_hermite = 0.5 * (SOC[i] + SOC[i + 1]) + (self.ds / 8.0) * (dsoc_ds_k - dsoc_ds_k1)
+                    for name, x in X.items():
+                        opti.subject_to(
+                            X_MID[name][i] == 0.5 * (x[i] + x[i + 1]) + (self.ds / 8.0) * (f_k[name] - f_k1[name])
+                        )
 
-                    opti.subject_to(V_MID[i] == v_mid_hermite)
-                    opti.subject_to(SOC_MID[i] == soc_mid_hermite)
-
-                    # 2. Compute derivatives at midpoint
-                    grad_mid = 0.5 * (gradient_arr[k] + gradient_arr[k + 1])
-                    radius_mid = 0.5 * (radius_arr[k] + radius_arr[k + 1])
-
-                    dv_ds_mid, dsoc_ds_mid, F_prop_mid, F_brake_mid, F_grip_mid = self._compute_derivatives(
-                        V_MID[i], SOC_MID[i],
-                        p_deploy, p_harvest, THROTTLE[i], BRAKE[i],
-                        grad_mid, radius_mid, veh, ers
+                    # 2. Derivatives and grip limits at the midpoint
+                    f_mid = self._point_dynamics(
+                        opti, {name: x[i] for name, x in X_MID.items()}, u,
+                        0.5 * (gradient_arr[k] + gradient_arr[k + 1]),
+                        0.5 * (radius_arr[k] + radius_arr[k + 1]),
+                        0.5 * (v_limit_profile[k] + v_limit_profile[k + 1]),
+                        grip_scale, tire, add_constraints=True,
                     )
-
-                    # Grip limits at midpoint
-                    self._add_grip_limit(opti, F_prop_mid, F_brake_mid, F_grip_mid, grip_scale)
 
                     # 3. Simpson quadrature: x[k+1] = x[k] + (h/6) * (f[k] + 4*f_mid + f[k+1])
-                    opti.subject_to(
-                        V[i + 1] == V[i] + (self.ds / 6.0) * (dv_ds_k + 4.0 * dv_ds_mid + dv_ds_k1)
-                    )
-                    opti.subject_to(
-                        SOC[i + 1] == SOC[i] + (self.ds / 6.0) * (dsoc_ds_k + 4.0 * dsoc_ds_mid + dsoc_ds_k1)
-                    )
+                    for name, x in X.items():
+                        opti.subject_to(
+                            x[i + 1] == x[i] + (self.ds / 6.0) * (f_k[name] + 4.0 * f_mid[name] + f_k1[name])
+                        )
                     dt = (self.ds / 6.0) * (
                         1.0 / ca.fmax(V[i], 5.0) + 4.0 / ca.fmax(V_MID[i], 5.0) + 1.0 / ca.fmax(V[i + 1], 5.0)
                     )
 
-            # --- Energy totals: states rather than lap-long sums, so each constraint only couples
-            # neighbouring nodes. Same quadrature as the SOC, so the battery bookkeeping is exact.
-            opti.subject_to(E_DEPLOY[i + 1] == E_DEPLOY[i] + p_deploy * dt / 1e6)
-            opti.subject_to(E_RECOVER[i + 1] == E_RECOVER[i] + p_harvest * dt / 1e6)
+            # --- Energy totals: same quadrature as the SOC, so the battery bookkeeping is exact ---
+            opti.subject_to(E_DEPLOY[i + 1] == E_DEPLOY[i] + u[0] * dt / 1e6)
+            opti.subject_to(E_RECOVER[i + 1] == E_RECOVER[i] + u[1] * dt / 1e6)
 
             # Control interlock (prevent simultaneous throttle + brake)
             opti.subject_to(THROTTLE[i] * BRAKE[i] <= 0.01)
@@ -380,14 +598,24 @@ class SpatialNLPSolver(BaseSolver):
             if per_lap_final_soc_min is not None:
                 opti.subject_to(SOC[end] >= per_lap_final_soc_min)
 
-        # State bounds (a worn tyre lowers the speed limit by sqrt(grip scale))
+        # State bounds (a worn tyre lowers the speed limit by sqrt(grip scale)). Dynamic tyres
+        # set their own cornering limit at each point, so the envelope is only a loose bound.
         v_limit_nodes = np.concatenate(
             [v_limit_profile[:-1] * np.sqrt(scale) for scale in lap_grip_scales]
             + [v_limit_profile[-1:] * np.sqrt(lap_grip_scales[-1])]
         )
-        v_limit_scale = 1.00 if degradation_enabled else 1.02
+        if tire is not None:
+            v_limit_scale = 1.10
+        else:
+            v_limit_scale = 1.00 if degradation_enabled else 1.02
         opti.subject_to(opti.bounded(ers.min_soc, SOC, ers.max_soc))
         opti.subject_to(opti.bounded(5.0, V, v_limit_nodes * v_limit_scale))
+
+        if tire is not None:
+            for name in TIRE_STATES:
+                wear = name in _WEAR_STATES
+                opti.subject_to(opti.bounded(0.0, X[name], 1.0) if wear else opti.bounded(20.0, X[name], 220.0))
+                opti.subject_to(X[name][0] == (0.0 if wear else tire.init_temp_c))
 
         # Control bounds
         opti.subject_to(P_DEPLOY >= 0)
@@ -398,6 +626,9 @@ class SpatialNLPSolver(BaseSolver):
         # Velocity boundary condition
         if is_flying_lap:
             opti.subject_to(V[0] == V[-1])
+        elif tire is not None:
+            # Allow a cold-tyre start below the nominal single-lap limit
+            opti.subject_to(V[0] <= v_limit_profile[0])
         else:
             opti.subject_to(V[0] == v_limit_profile[0])
 
@@ -407,7 +638,13 @@ class SpatialNLPSolver(BaseSolver):
                 [0.5 * (v_limit_profile[:-1] + v_limit_profile[1:]) * np.sqrt(scale) for scale in lap_grip_scales]
             )
             opti.subject_to(opti.bounded(5.0, V_MID, v_limit_mid * v_limit_scale))
-            opti.subject_to(opti.bounded(ers.min_soc, SOC_MID, ers.max_soc))
+            opti.subject_to(opti.bounded(ers.min_soc, X_MID["SOC"], ers.max_soc))
+            if tire is not None:
+                for name in TIRE_STATES:
+                    wear = name in _WEAR_STATES
+                    opti.subject_to(
+                        opti.bounded(0.0, X_MID[name], 1.0) if wear else opti.bounded(20.0, X_MID[name], 220.0)
+                    )
 
         # =================================================================
         # SOLVE
@@ -415,18 +652,21 @@ class SpatialNLPSolver(BaseSolver):
 
         self._configure_solver(opti)
 
-        # Initial guess: follow the speed limit closely, drain the battery linearly
+        # Initial guess: follow the speed limit closely, drain the battery linearly, warm tyres wearing slowly
         soc_target = max(final_soc_min, per_lap_final_soc_min or ers.min_soc)
-        soc_guess = np.linspace(initial_soc, soc_target, n + 1)
-        opti.set_initial(V, v_limit_nodes * 0.95)
-        opti.set_initial(SOC, soc_guess)
+        guesses = {"V": v_limit_nodes * 0.95, "SOC": np.linspace(initial_soc, soc_target, n + 1)}
+        if tire is not None:
+            for name in TIRE_STATES:
+                wear = name in _WEAR_STATES
+                guesses[name] = np.linspace(0.0, 0.15, n + 1) if wear else np.full(n + 1, tire.init_temp_c)
+        for name, guess in guesses.items():
+            opti.set_initial(X[name], guess)
+            if method == CollocationMethod.HERMITE_SIMPSON:
+                opti.set_initial(X_MID[name], 0.5 * (guess[:-1] + guess[1:]))
         opti.set_initial(THROTTLE, 0.8)
-        if method == CollocationMethod.HERMITE_SIMPSON:
-            opti.set_initial(V_MID, v_limit_mid * 0.95)
-            opti.set_initial(SOC_MID, 0.5 * (soc_guess[:-1] + soc_guess[1:]))
 
         variables = dict(
-            V=V, SOC=SOC, E_DEPLOY=E_DEPLOY, E_RECOVER=E_RECOVER,
+            X, E_DEPLOY=E_DEPLOY, E_RECOVER=E_RECOVER,
             P_DEPLOY=P_DEPLOY, P_HARVEST=P_HARVEST, THROTTLE=THROTTLE, BRAKE=BRAKE,
         )
 
@@ -435,7 +675,7 @@ class SpatialNLPSolver(BaseSolver):
         except RuntimeError as e:
             return_status = opti.debug.stats().get("return_status", "unknown")
             last_iterate = self._extract_trajectory(
-                opti.debug, variables, f"failed: {return_status}", n_laps, lap_grip_scales
+                opti.debug, variables, f"failed: {return_status}", n_laps, lap_grip_scales, tire
             )
             raise SolverError(
                 f"{self.name}({self._resolved_nlp_solver}) did not converge: {return_status}", last_iterate
@@ -443,7 +683,7 @@ class SpatialNLPSolver(BaseSolver):
 
         return_status = sol.stats().get("return_status", "Solve_Succeeded")
         status = _SUCCESS_STATUS.get(return_status, return_status)
-        return self._extract_trajectory(sol, variables, status, n_laps, lap_grip_scales)
+        return self._extract_trajectory(sol, variables, status, n_laps, lap_grip_scales, tire)
 
     def _get_effective_drag_coefficient(self, veh, ers, radius_k: float):
         """
@@ -503,7 +743,7 @@ class SpatialNLPSolver(BaseSolver):
 
         raise ValueError(f"Unknown NLP solver backend: {backend}")
 
-    def _extract_trajectory(self, sol, variables, status, n_laps, lap_grip_scales):
+    def _extract_trajectory(self, sol, variables, status, n_laps, lap_grip_scales, tire=None):
         """Extract and package the optimization results."""
         PS = self.POWER_SCALE
         v_opt = sol.value(variables["V"])
@@ -546,6 +786,21 @@ class SpatialNLPSolver(BaseSolver):
             trajectory.lap_energy_recovered = np.diff(e_recover[ends])
             trajectory.lap_start_soc = soc_opt[ends[:-1]]
             trajectory.lap_end_soc = soc_opt[ends[1:]]
-            trajectory.lap_grip_scales = lap_grip_scales
+            trajectory.lap_grip_scales = None if tire is not None else lap_grip_scales
+
+        if tire is not None:
+            states = {name: np.asarray(sol.value(variables[name]), dtype=float) for name in TIRE_STATES}
+            trajectory.tire_temp_surface_front = states["TSF"]
+            trajectory.tire_temp_surface_rear = states["TSR"]
+            trajectory.tire_temp_core_front = states["TCF"]
+            trajectory.tire_temp_core_rear = states["TCR"]
+            trajectory.tire_wear_front = states["WF"]
+            trajectory.tire_wear_rear = states["WR"]
+            trajectory.tire_mu_scale_front = np.array(
+                [mu_scale_np(t, w, tire.thermal, tire.compound) for t, w in zip(states["TCF"], states["WF"])]
+            )
+            trajectory.tire_mu_scale_rear = np.array(
+                [mu_scale_np(t, w, tire.thermal, tire.compound) for t, w in zip(states["TCR"], states["WR"])]
+            )
 
         return trajectory

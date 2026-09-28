@@ -39,6 +39,14 @@ class OptimalTrajectory:
     lap_start_soc: Optional[np.ndarray] = None
     lap_end_soc: Optional[np.ndarray] = None
     lap_grip_scales: Optional[np.ndarray] = None
+    tire_temp_surface_front: Optional[np.ndarray] = None
+    tire_temp_surface_rear: Optional[np.ndarray] = None
+    tire_temp_core_front: Optional[np.ndarray] = None
+    tire_temp_core_rear: Optional[np.ndarray] = None
+    tire_wear_front: Optional[np.ndarray] = None
+    tire_wear_rear: Optional[np.ndarray] = None
+    tire_mu_scale_front: Optional[np.ndarray] = None
+    tire_mu_scale_rear: Optional[np.ndarray] = None
 
     def get_reference_at_distance(self, distance: float) -> Dict:
         """reference values at given distance (with lap wrapping)."""
@@ -85,6 +93,22 @@ class OptimalTrajectory:
             stats['lap_end_soc'] = self.lap_end_soc
         if self.lap_grip_scales is not None:
             stats['lap_grip_scales'] = self.lap_grip_scales
+        if self.tire_temp_surface_front is not None:
+            stats['tire_temp_surface_front_C'] = self.tire_temp_surface_front
+        if self.tire_temp_surface_rear is not None:
+            stats['tire_temp_surface_rear_C'] = self.tire_temp_surface_rear
+        if self.tire_temp_core_front is not None:
+            stats['tire_temp_core_front_C'] = self.tire_temp_core_front
+        if self.tire_temp_core_rear is not None:
+            stats['tire_temp_core_rear_C'] = self.tire_temp_core_rear
+        if self.tire_wear_front is not None:
+            stats['tire_wear_front'] = self.tire_wear_front
+        if self.tire_wear_rear is not None:
+            stats['tire_wear_rear'] = self.tire_wear_rear
+        if self.tire_mu_scale_front is not None:
+            stats['tire_mu_scale_front'] = self.tire_mu_scale_front
+        if self.tire_mu_scale_rear is not None:
+            stats['tire_mu_scale_rear'] = self.tire_mu_scale_rear
 
         return stats
 

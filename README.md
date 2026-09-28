@@ -232,6 +232,14 @@ python main.py [OPTIONS]
 | `--laps` | int | `1` | Number of consecutive laps in the NLP horizon |
 | `--per-lap-final-soc-min` | float | `None` | Optional SOC floor at each lap boundary |
 | `--regulations` | str | `2025` | Regulation set: `2025` or `2026` |
+| `--enable-tire-degradation/--no-tire-degradation` | flag | `False` | Scalar tire model: lose grip lap by lap |
+| `--tire-wear-rate-per-lap` | float | `0.012` | Scalar tire model: grip fraction lost per lap |
+| `--tire-min-grip-scale` | float | `0.88` | Scalar tire model: minimum grip scale |
+| `--tire-model` | str | `scalar` | `scalar` (per-lap grip scale) or `dynamic` (tire temperature and wear states; multi-lap only) |
+| `--tire-compound` | str | `medium` | Dynamic tire model: `soft`, `medium` or `hard` |
+| `--ambient-temp-c` | float | `25.0` | Dynamic tire model: air temperature (°C) |
+| `--track-temp-c` | float | `35.0` | Dynamic tire model: track temperature (°C) |
+| `--tire-init-temp-c` | float | `80.0` | Dynamic tire model: tire temperature at the start (°C) |
 | `--collocation` | str | `euler` | Integration method: `euler`, `trapezoidal`, `hermite_simpson` |
 | `--nlp-solver` | str | `auto` | NLP backend: `auto` (= `ipopt`), `ipopt`, `fatrop`, or `sqpmethod` |
 | `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |

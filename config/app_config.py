@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
@@ -20,6 +20,11 @@ class AppConfig:
     laps: int = 1
     per_lap_final_soc_min: float | None = None
     enable_tire_degradation: bool = False
+    tire_model: Literal["scalar", "dynamic"] = "scalar"
+    tire_compound: Literal["soft", "medium", "hard"] = "medium"
+    ambient_temp_c: float = 25.0
+    track_temp_c: float = 35.0
+    tire_init_temp_c: float = 80.0
     tire_wear_rate_per_lap: float = 0.012
     tire_min_grip_scale: float = 0.88
     flying_lap: bool = True
@@ -68,6 +73,11 @@ def cli(
     enable_tire_degradation: Annotated[bool, typer.Option("--enable-tire-degradation/--no-tire-degradation", help="Enable grip loss over laps")] = False,
     tire_wear_rate_per_lap: Annotated[float, typer.Option(help="Grip fraction lost per lap")] = 0.012,
     tire_min_grip_scale: Annotated[float, typer.Option(help="Minimum grip scale floor (0, 1]")] = 0.88,
+    tire_model: Annotated[str, typer.Option(help="Tire model: scalar (per-lap grip scale) or dynamic (temperature and wear states, multi-lap)")] = "scalar",
+    tire_compound: Annotated[str, typer.Option(help="Tire compound for the dynamic model: soft, medium, hard")] = "medium",
+    ambient_temp_c: Annotated[float, typer.Option(help="Air temperature [C] (dynamic tire model)")] = 25.0,
+    track_temp_c: Annotated[float, typer.Option(help="Track temperature [C] (dynamic tire model)")] = 35.0,
+    tire_init_temp_c: Annotated[float, typer.Option(help="Tire temperature at the start [C] (dynamic tire model)")] = 80.0,
 
     # ── Solver ────────────────────────────────────────────────────
     solver: Annotated[str, typer.Option(help="Solver type (nlp)")] = "nlp",
@@ -94,7 +104,9 @@ def cli(
         "flying_lap": flying_lap, "regulations": regulations,
         "enable_tire_degradation": enable_tire_degradation,
         "tire_wear_rate_per_lap": tire_wear_rate_per_lap,
-        "tire_min_grip_scale": tire_min_grip_scale, "solver": solver,
+        "tire_min_grip_scale": tire_min_grip_scale, "tire_model": tire_model,
+        "tire_compound": tire_compound, "ambient_temp_c": ambient_temp_c,
+        "track_temp_c": track_temp_c, "tire_init_temp_c": tire_init_temp_c, "solver": solver,
         "collocation": collocation, "nlp_solver": nlp_solver,
         "ipopt_linear_solver": ipopt_linear_solver, "ipopt_hessian": ipopt_hessian,
         "plot": plot, "save_animation": save_animation,
@@ -102,7 +114,7 @@ def cli(
 
     if config is not None:
         yaml_values = _load_yaml_defaults(config)
-        unknown = sorted(set(yaml_values) - set(cli_values))
+        unknown = sorted(set(yaml_values) - {field.name for field in fields(AppConfig)})
         if unknown:
             raise typer.BadParameter(f"unknown keys in {config}: {', '.join(unknown)}", param_hint="--config")
         # YAML replaces the defaults; only options typed on the command line override it

@@ -81,6 +81,8 @@ def export_results(
     args,
     *,
     lap_grip_scales: np.ndarray | None = None,
+    tire_model: str | None = None,
+    tire_compound: str | None = None,
 ) -> Dict:
 
     energy_stats = optimal_trajectory.compute_energy_stats()
@@ -103,6 +105,11 @@ def export_results(
             'per_lap_final_soc_min': getattr(args, 'per_lap_final_soc_min', None),
             'ds': getattr(args, 'ds', None),
             'enable_tire_degradation': getattr(args, 'enable_tire_degradation', False),
+            'tire_model': tire_model if tire_model is not None else getattr(args, 'tire_model', 'scalar'),
+            'tire_compound': tire_compound if tire_compound is not None else getattr(args, 'tire_compound', None),
+            'ambient_temp_c': getattr(args, 'ambient_temp_c', None),
+            'track_temp_c': getattr(args, 'track_temp_c', None),
+            'tire_init_temp_c': getattr(args, 'tire_init_temp_c', None),
             'tire_wear_rate_per_lap': getattr(args, 'tire_wear_rate_per_lap', None),
             'tire_min_grip_scale': getattr(args, 'tire_min_grip_scale', None),
         },
@@ -146,6 +153,18 @@ def export_results(
     if lap_grip_scales is not None:
         results['tire_degradation'] = {
             'lap_grip_scales': lap_grip_scales,
+        }
+
+    if optimal_trajectory.tire_temp_surface_front is not None:
+        results['tire_dynamics'] = {
+            'temp_surface_front_C': optimal_trajectory.tire_temp_surface_front,
+            'temp_surface_rear_C': optimal_trajectory.tire_temp_surface_rear,
+            'temp_core_front_C': optimal_trajectory.tire_temp_core_front,
+            'temp_core_rear_C': optimal_trajectory.tire_temp_core_rear,
+            'wear_front': optimal_trajectory.tire_wear_front,
+            'wear_rear': optimal_trajectory.tire_wear_rear,
+            'mu_scale_front': optimal_trajectory.tire_mu_scale_front,
+            'mu_scale_rear': optimal_trajectory.tire_mu_scale_rear,
         }
     
     return results
