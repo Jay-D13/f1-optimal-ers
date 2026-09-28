@@ -206,7 +206,7 @@ def create_comparison_plot(track: F1TrackModel,
     
     # Cumulative energy
     ax6 = plt.subplot(4, 2, 6)
-    dt = 0.1  # Assuming 0.1s time step
+    dt = np.diff(optimal_trajectory.t_opt)  # Time spent on each interval
     cumulative_deployed = np.cumsum(np.maximum(optimal_trajectory.P_ers_opt, 0) * dt) / 1e6
     cumulative_recovered = np.cumsum(np.maximum(-optimal_trajectory.P_ers_opt, 0) * dt) / 1e6
     cumulative_net = cumulative_deployed - cumulative_recovered

@@ -146,17 +146,19 @@ uv run python main.py --track Monza --regulations 2026 --plot
 uv run python main.py --track Monza --laps 10 --final-soc-min 0.45 --per-lap-final-soc-min 0.40
 ```
 
-### Apple Silicon Note (M5 tested)
-
-- Multi-lap NLP runs on Apple Silicon are supported, but can be much slower than high-end desktop x86 CPUs.
-- On an M5 test machine, large multi-lap problems (especially with `--ds 5`) were also more crash-prone with Ipopt.
-- Use `--nlp-solver auto` (default) so Apple Silicon prefers `fatrop`.
-- If needed, reduce horizon size first (`--laps`) before increasing `--ds`.
+### Run the tests
 
 ```bash
-# Recommended starting point on Apple Silicon
-uv run python main.py --track Monza --ds 5 --laps 2 --nlp-solver auto
+uv run python -m unittest discover -s tests
+
+# Also solve every bundled track under both rule sets (~2 min)
+RUN_TRACK_SWEEP=1 uv run python -m unittest discover -s tests
 ```
+
+### Apple Silicon Note (M5 tested)
+
+- Ipopt runs on Apple Silicon. The solver sets MUMPS's AMD ordering (`mumps_pivot_order = 0`) on every platform, because the default ordering in CasADi's bundled MUMPS segfaults on Apple Silicon.
+- `--nlp-solver auto` (the default) means Ipopt everywhere. `fatrop` is available as an opt-in, but it barely progresses on this problem.
 
 On first run, FastF1 will download session telemetry data to `data/cache/`. This may take a few minutes.
 
@@ -231,9 +233,9 @@ python main.py [OPTIONS]
 | `--per-lap-final-soc-min` | float | `None` | Optional SOC floor at each lap boundary |
 | `--regulations` | str | `2025` | Regulation set: `2025` or `2026` |
 | `--collocation` | str | `euler` | Integration method: `euler`, `trapezoidal`, `hermite_simpson` |
-| `--nlp-solver` | str | `auto` | NLP backend: `auto`, `ipopt`, `fatrop`, or `sqpmethod` |
+| `--nlp-solver` | str | `auto` | NLP backend: `auto` (= `ipopt`), `ipopt`, `fatrop`, or `sqpmethod` |
 | `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |
-| `--ipopt-hessian` | str | `limited-memory` | Ipopt Hessian mode: `limited-memory` or `exact` |
+| `--ipopt-hessian` | str | `exact` | Ipopt Hessian mode: `exact`, or `limited-memory` (faster per iteration, but can stop seconds away from the optimum) |
 | `--flying-lap/--no-flying-lap` | flag | `True` | Continuous lap (no standing start) |
 | `--use-tumftm/--no-use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
 | `--plot/--no-plot` | flag | `True` | Enable or disable visualization plots |
@@ -258,8 +260,8 @@ python main.py --track Spa --regulations 2026 --plot --save-animation
 # Multi-lap stint optimization (race strategy)
 python main.py --track Monza --laps 12 --initial-soc 0.55 --final-soc-min 0.45 --per-lap-final-soc-min 0.35
 
-# Auto backend mode (fatrop on Apple Silicon, ipopt otherwise)
-python main.py --track Monza --ds 5 --laps 10 --nlp-solver auto
+# Explicit backend choice (auto = ipopt)
+python main.py --track Monza --ds 5 --laps 10 --nlp-solver ipopt
 
 # Use TUMFTM raceline instead of FastF1
 python main.py --track Monaco --use-tumftm --plot
@@ -280,7 +282,7 @@ Resolution order is:
 
 ### Config File Format
 
-Use JSON or YAML with keys that match CLI flag names (without the `--`).
+Use JSON or YAML with keys that match the CLI option names, with underscores (`initial_soc` for `--initial-soc`). Unknown keys are rejected.
 
 ```yaml
 track: Monza
