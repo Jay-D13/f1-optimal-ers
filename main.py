@@ -14,7 +14,9 @@ from solvers import (
 from models import F1TrackModel, VehicleDynamicsModel
 from config import (
     ERSConfig,
+    TireThermalConfig,
     VehicleConfig,
+    get_tire_compound_config,
     get_vehicle_config,
     get_ers_config,
 )
@@ -58,6 +60,34 @@ def _format_lap_grip_scales(lap_grip_scales: np.ndarray | None) -> str:
     return "\n".join(lines)
 
 
+def _format_dynamic_tire_summary(trajectory) -> str:
+    """Format tire thermal/degradation outputs for text summary."""
+    if trajectory.tire_temp_core_front is None:
+        return ""
+
+    lines = ["        DYNAMIC TIRE STATES:"]
+    lines.append(
+        "        Core Temp Front:     "
+        f"{trajectory.tire_temp_core_front[0]:.1f} -> {trajectory.tire_temp_core_front[-1]:.1f} C "
+        f"(min {trajectory.tire_temp_core_front.min():.1f}, max {trajectory.tire_temp_core_front.max():.1f})"
+    )
+    lines.append(
+        "        Core Temp Rear:      "
+        f"{trajectory.tire_temp_core_rear[0]:.1f} -> {trajectory.tire_temp_core_rear[-1]:.1f} C "
+        f"(min {trajectory.tire_temp_core_rear.min():.1f}, max {trajectory.tire_temp_core_rear.max():.1f})"
+    )
+    lines.append(
+        "        Wear Front/Rear:     "
+        f"{trajectory.tire_wear_front[-1]:.3f} / {trajectory.tire_wear_rear[-1]:.3f}"
+    )
+    lines.append(
+        "        Mu Scale Front/Rear: "
+        f"{trajectory.tire_mu_scale_front[0]:.3f}->{trajectory.tire_mu_scale_front[-1]:.3f} / "
+        f"{trajectory.tire_mu_scale_rear[0]:.3f}->{trajectory.tire_mu_scale_rear[-1]:.3f}"
+    )
+    return "\n".join(lines)
+
+
 def main(args):
     """Main execution function."""
     
@@ -67,6 +97,12 @@ def main(args):
         raise ValueError("--tire_wear_rate_per_lap must be >= 0")
     if not (0.0 < args.tire_min_grip_scale <= 1.0):
         raise ValueError("--tire_min_grip_scale must be in (0, 1]")
+    if args.ambient_temp_c < -40.0 or args.ambient_temp_c > 80.0:
+        raise ValueError("--ambient_temp_c must be in [-40, 80]")
+    if args.track_temp_c < -20.0 or args.track_temp_c > 120.0:
+        raise ValueError("--track_temp_c must be in [-20, 120]")
+    if args.tire_init_temp_c < -20.0 or args.tire_init_temp_c > 200.0:
+        raise ValueError("--tire_init_temp_c must be in [-20, 200]")
 
     print("="*70)
     print("  F1 ERS OPTIMAL CONTROL")
@@ -111,10 +147,27 @@ def main(args):
         print(f"Ipopt Hessian: {args.ipopt_hessian}")
     if args.per_lap_final_soc_min is not None:
         print(f"Per-lap SOC floor: {args.per_lap_final_soc_min:.2f}")
-    print(f"Tire degradation: {'ON' if args.enable_tire_degradation else 'OFF'}")
-    if args.enable_tire_degradation:
-        print(f"Tire wear rate/lap: {args.tire_wear_rate_per_lap:.4f}")
-        print(f"Tire minimum grip scale: {args.tire_min_grip_scale:.3f}")
+    requested_tire_model = args.tire_model
+    active_tire_model = requested_tire_model
+    if requested_tire_model == "dynamic" and args.laps <= 1:
+        active_tire_model = "scalar"
+        print("Tire model: dynamic requested but single-lap run -> fallback to scalar")
+    else:
+        print(f"Tire model: {active_tire_model}")
+
+    tire_thermal_config = TireThermalConfig()
+    tire_compound_config = get_tire_compound_config(args.tire_compound)
+    if active_tire_model == "dynamic":
+        print(f"Tire compound: {tire_compound_config.name}")
+        print(
+            f"Tire temperatures: ambient {args.ambient_temp_c:.1f}C, "
+            f"track {args.track_temp_c:.1f}C, init {args.tire_init_temp_c:.1f}C"
+        )
+    else:
+        print(f"Tire degradation: {'ON' if args.enable_tire_degradation else 'OFF'}")
+        if args.enable_tire_degradation:
+            print(f"Tire wear rate/lap: {args.tire_wear_rate_per_lap:.4f}")
+            print(f"Tire minimum grip scale: {args.tire_min_grip_scale:.3f}")
     
     # =========================================================================
     print("\n" + "="*70)
@@ -174,7 +227,7 @@ def main(args):
     print(f"     Theoretical improvement: {velocity_profile_no_ers.lap_time - velocity_profile_with_ers.lap_time:.3f}s")
 
     lap_grip_scales = None
-    if args.enable_tire_degradation:
+    if active_tire_model == "scalar" and args.enable_tire_degradation:
         if args.laps > 1:
             lap_grip_scales = build_lap_grip_scales(
                 n_laps=args.laps,
@@ -229,6 +282,12 @@ def main(args):
             is_flying_lap=args.flying_lap,
             per_lap_final_soc_min=args.per_lap_final_soc_min,
             lap_grip_scales=lap_grip_scales,
+            tire_model=active_tire_model,
+            tire_thermal_config=tire_thermal_config,
+            tire_compound_config=tire_compound_config,
+            ambient_temp_c=args.ambient_temp_c,
+            track_temp_c=args.track_temp_c,
+            tire_init_temp_c=args.tire_init_temp_c,
         )
     
     # =========================================================================
@@ -246,6 +305,7 @@ def main(args):
     gap_to_theoretical = total_time_optimal - total_time_with_ers
     lap_breakdown = _format_multi_lap_breakdown(optimal_trajectory)
     lap_grip_block = _format_lap_grip_scales(lap_grip_scales)
+    dynamic_tire_block = _format_dynamic_tire_summary(optimal_trajectory)
     
     summary_text = f"""
         {'='*70}
@@ -290,6 +350,7 @@ def main(args):
 
 {lap_breakdown if lap_breakdown else ""}
 {lap_grip_block if lap_grip_block else ""}
+{dynamic_tire_block if dynamic_tire_block else ""}
         {'='*70}
     """
     
@@ -307,6 +368,8 @@ def main(args):
         track,
         args,
         lap_grip_scales=lap_grip_scales,
+        tire_model=active_tire_model,
+        tire_compound=tire_compound_config.name if active_tire_model == "dynamic" else None,
     )
     run_manager.save_json(results_dict, 'results_summary')
     
@@ -327,6 +390,15 @@ def main(args):
         run_manager.save_numpy(optimal_trajectory.lap_energy_recovered, 'lap_energy_recovered')
     if lap_grip_scales is not None:
         run_manager.save_numpy(np.asarray(lap_grip_scales), 'lap_grip_scales')
+    if optimal_trajectory.tire_temp_surface_front is not None:
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_temp_surface_front), 'tire_temp_surface_front')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_temp_surface_rear), 'tire_temp_surface_rear')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_temp_core_front), 'tire_temp_core_front')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_temp_core_rear), 'tire_temp_core_rear')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_wear_front), 'tire_wear_front')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_wear_rear), 'tire_wear_rear')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_mu_scale_front), 'tire_mu_scale_front')
+        run_manager.save_numpy(np.asarray(optimal_trajectory.tire_mu_scale_rear), 'tire_mu_scale_rear')
     
     # =========================================================================
     if args.plot:

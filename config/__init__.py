@@ -1,4 +1,5 @@
 from .ers import ERSConfig, ERSConfigQualifying, ERSConfigRace, get_ers_config
+from .tire_model import TireCompoundConfig, TireThermalConfig, get_tire_compound_config
 from .vehicle import VehicleConfig, TireParameters, get_vehicle_config
 
 def get_default_config() -> tuple:
@@ -33,4 +34,7 @@ __all__ = [
     'get_track_config',
     'get_vehicle_config',
     'get_ers_config',
+    'TireThermalConfig',
+    'TireCompoundConfig',
+    'get_tire_compound_config',
 ]

@@ -186,6 +186,61 @@ class SpatialNLPSolver(BaseSolver):
 
         return dv_ds, dsoc_ds, F_prop, F_brake, F_grip
 
+    def _compute_axle_normal_loads(self, v, gradient, veh):
+        """Estimate front/rear axle normal loads with static + aero contribution."""
+        wb = veh.wheelbase
+        front_static_ratio = veh.lr / wb
+        rear_static_ratio = veh.lf / wb
+
+        F_weight = veh.mass * veh.g * ca.cos(gradient)
+        q = 0.5 * veh.rho_air * v**2
+        F_aero_f = q * veh.c_z_a_f
+        F_aero_r = q * veh.c_z_a_r
+
+        F_z_f = front_static_ratio * F_weight + F_aero_f
+        F_z_r = rear_static_ratio * F_weight + F_aero_r
+        return F_z_f, F_z_r
+
+    def _split_lateral_force_by_load(self, F_lat_total, F_z_f, F_z_r):
+        """Split lateral demand front/rear proportionally to axle normal loads."""
+        F_z_sum = ca.fmax(F_z_f + F_z_r, 1.0)
+        front_ratio = F_z_f / F_z_sum
+        rear_ratio = F_z_r / F_z_sum
+        return front_ratio * F_lat_total, rear_ratio * F_lat_total
+
+    def _compute_load_sensitive_mu(self, F_z, mu0: float, dmu_dfz: float):
+        tires = self.vehicle.tires
+        mu = mu0 + dmu_dfz * (F_z - tires.fz_0)
+        return ca.fmax(mu, 0.5)
+
+    def _compute_axle_force_potentials(self, F_z_f, F_z_r, mu_scale_f, mu_scale_r):
+        """Return axle force limits (Fx/Fy potentials) including load sensitivity."""
+        tires = self.vehicle.tires
+
+        mu_x_f = self._compute_load_sensitive_mu(F_z_f, tires.mux_f, tires.dmux_dfz_f) * mu_scale_f
+        mu_y_f = self._compute_load_sensitive_mu(F_z_f, tires.muy_f, tires.dmuy_dfz_f) * mu_scale_f
+        mu_x_r = self._compute_load_sensitive_mu(F_z_r, tires.mux_r, tires.dmux_dfz_r) * mu_scale_r
+        mu_y_r = self._compute_load_sensitive_mu(F_z_r, tires.muy_r, tires.dmuy_dfz_r) * mu_scale_r
+
+        F_x_max_f = ca.fmax(mu_x_f * F_z_f, 1.0)
+        F_y_max_f = ca.fmax(mu_y_f * F_z_f, 1.0)
+        F_x_max_r = ca.fmax(mu_x_r * F_z_r, 1.0)
+        F_y_max_r = ca.fmax(mu_y_r * F_z_r, 1.0)
+        return F_x_max_f, F_x_max_r, F_y_max_f, F_y_max_r
+
+    def _split_longitudinal_force(self, F_long):
+        """
+        Split net longitudinal tire force between axles.
+        Positive force (traction) is rear-biased, braking uses both axles with front bias.
+        """
+        sigma_acc = 0.5 * (1.0 + ca.tanh(F_long / 1000.0))
+        sigma_brk = 1.0 - sigma_acc
+
+        # F1 traction is heavily rear-biased; braking has front bias.
+        front_ratio = sigma_acc * 0.05 + sigma_brk * 0.60
+        rear_ratio = sigma_acc * 0.95 + sigma_brk * 0.40
+        return front_ratio * F_long, rear_ratio * F_long
+
     def _build_and_solve(
         self,
         v_limit_profile: np.ndarray,
