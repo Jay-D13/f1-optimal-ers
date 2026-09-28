@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import fastf1 as ff1
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d, UnivariateSpline
@@ -55,6 +56,15 @@ class TrackData:
     sector: np.ndarray
     is_braking_zone: np.ndarray
     is_acceleration_zone: np.ndarray
+
+
+def find_tumftm_raceline(track: str, directory: str | Path = "data/racelines") -> Optional[Path]:
+    """Bundled TUMFTM raceline for a track name. File names are matched case-insensitively (Linux disks are case-sensitive)."""
+    for path in sorted(Path(directory).glob("*.csv")):
+        if path.stem.lower() == track.lower():
+            return path
+    return None
+
 
 class F1TrackModel:
     """Track model built from FastF1 telemetry data"""

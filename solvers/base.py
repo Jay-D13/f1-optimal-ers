@@ -27,7 +27,7 @@ class OptimalTrajectory:
     
     # Solver metadata
     solve_time: float          # Computation time (s)
-    solver_status: str         # 'optimal', 'suboptimal', 'failed'
+    solver_status: str         # 'optimal', 'acceptable' (Ipopt's looser tolerance), or 'failed: <reason>'
     solver_name: str           # Name of solver used
     
     # Optional multi-lap metadata
@@ -111,6 +111,15 @@ class OptimalTrajectory:
             stats['tire_mu_scale_rear'] = self.tire_mu_scale_rear
 
         return stats
+
+
+class SolverError(RuntimeError):
+    """The NLP solver stopped without converging. `last_iterate` is its final iterate, for debugging only."""
+
+    def __init__(self, message: str, last_iterate: Optional[OptimalTrajectory] = None):
+        super().__init__(message)
+        self.last_iterate = last_iterate
+
 
 class BaseSolver(ABC):
 

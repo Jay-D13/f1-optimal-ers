@@ -11,12 +11,12 @@ from solvers import (
     SpatialNLPSolver,
     MultiLapSpatialNLPSolver,
 )
-from models import F1TrackModel, VehicleDynamicsModel
+from models import F1TrackModel, VehicleDynamicsModel, find_tumftm_raceline
 from config import (
     ERSConfig,
     TireThermalConfig,
-    VehicleConfig,
     get_tire_compound_config,
+    get_track_config,
     get_vehicle_config,
     get_ers_config,
 )
@@ -118,19 +118,7 @@ def main(args):
     ers_config = get_ers_config(args.regulations)
     
     # Vehicle config (track-specific)
-    track_configs = {
-        'monaco': VehicleConfig.for_monaco,
-        'monza': VehicleConfig.for_monza,
-        'montreal': VehicleConfig.for_montreal,
-        'spa': VehicleConfig.for_spa,
-        'silverstone': VehicleConfig.for_silverstone,
-    }
-    
-    vehicle_config = track_configs.get(
-        args.track.lower(), 
-        lambda: VehicleConfig()
-    )()
-    vehicle_config = get_vehicle_config(args.regulations, base=vehicle_config)
+    vehicle_config = get_vehicle_config(args.regulations, base=get_track_config(args.track))
     
     print(f"\nTrack: {args.track}")
     print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
@@ -141,8 +129,8 @@ def main(args):
     print(f"Laps in NLP horizon: {args.laps}")
     print(f"NLP Backend: {args.nlp_solver}")
     if args.nlp_solver == "auto":
-        print("NLP Backend Auto: fatrop on Apple Silicon, ipopt otherwise")
-    if args.nlp_solver == "ipopt":
+        print("NLP Backend Auto: ipopt")
+    if args.nlp_solver in ("auto", "ipopt"):
         print(f"Ipopt linear solver: {args.ipopt_linear_solver}")
         print(f"Ipopt Hessian: {args.ipopt_hessian}")
     if args.per_lap_final_soc_min is not None:
@@ -178,9 +166,9 @@ def main(args):
     driver = args.driver #if args.driver else 'VER' # DU DU DU DUUU MAX VERSTAPPEN
     
     # Try TUMFTM raceline first, fallback to FastF1
-    tumftm_path = Path(f'data/racelines/{args.track.lower()}.csv')
+    tumftm_path = find_tumftm_raceline(args.track)
     
-    if tumftm_path.exists() and args.use_tumftm:
+    if tumftm_path is not None and args.use_tumftm:
         print(f"   Loading TUMFTM raceline: {tumftm_path}")
         track.load_from_tumftm_raceline(str(tumftm_path))
     else:

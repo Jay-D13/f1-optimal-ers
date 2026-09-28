@@ -3,6 +3,7 @@ from .base import (
     VelocityProfileSolver,
     OptimalTrajectory,
     VelocityProfile,
+    SolverError,
 )
 
 from .forward_backward import (
@@ -28,6 +29,7 @@ __all__ = [
     'VelocityProfileSolver', 
     'OptimalTrajectory',
     'VelocityProfile',
+    'SolverError',
     
     # Velocity profile
     'ForwardBackwardSolver',
