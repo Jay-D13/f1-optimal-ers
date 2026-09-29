@@ -32,9 +32,17 @@ def round_residuals(params: Mapping[str, float], round_number: int) -> np.ndarra
     ])
 
 
+FAILED = 1e3                 # Residual given to every entry when a solve fails, so that the step is rejected
+
+
 def _job(args):
+    """round_residuals, or None when the solve fails (reported, so that one bad point doesn't end a fit)."""
     params, round_number = args
-    return round_residuals(params, round_number)
+    try:
+        return round_residuals(params, round_number)
+    except Exception as error:
+        print(f"   ! round {round_number} failed ({error}) at " + ", ".join(f"{k} {v:.4g}" for k, v in params.items()), flush=True)
+        return None
 
 
 class Fit:
@@ -59,16 +67,23 @@ class Fit:
         return np.array([(values[p.name] - p.lower) / (p.upper - p.lower) for p in self.parameters])
 
     def _evaluate_many(self, xs) -> List[np.ndarray]:
+        """Residual vector for each point, or None where any round's solve failed."""
         jobs = [(self.params(x), r) for x in xs for r in self.rounds]
         with ProcessPoolExecutor(self.workers) as pool:
             flat = list(pool.map(_job, jobs))
         n = len(self.rounds)
-        return [np.concatenate(flat[i * n:(i + 1) * n]) for i in range(len(xs))]
+        rows = [flat[i * n:(i + 1) * n] for i in range(len(xs))]
+        return [None if any(part is None for part in row) else np.concatenate(row) for row in rows]
 
     def residuals(self, x) -> np.ndarray:
         key = tuple(np.round(x, 12))
         if key not in self._cache:
-            self._cache[key] = self._evaluate_many([x])[0]
+            value = self._evaluate_many([x])[0]
+            if value is None:
+                if not self._cache:
+                    raise RuntimeError("The start point doesn't solve")
+                value = np.full(len(next(iter(self._cache.values()))), FAILED)
+            self._cache[key] = value
             cost = 0.5 * float(self._cache[key] @ self._cache[key])
             self.history.append({"params": self.params(x), "cost": cost})
             print(f"   cost {cost:10.2f}  " + "  ".join(f"{p.name} {self.params(x)[p.name]:.4f}" for p in self.parameters), flush=True)
@@ -80,9 +95,14 @@ class Fit:
         steps = [step if xi + step <= 1.0 else -step for xi in x]
         points = [x + h * np.eye(len(x))[i] for i, h in enumerate(steps)]
         values = self._evaluate_many(points)
-        for point, value in zip(points, values):
-            self._cache[tuple(np.round(point, 12))] = value
-        return np.column_stack([(v - base) / h for v, h in zip(values, steps)])
+        # A failed solve: try the step the other way, else leave that column out
+        retry = [i for i, v in enumerate(values) if v is None]
+        if retry:
+            flipped = self._evaluate_many([x - steps[i] * np.eye(len(x))[i] for i in retry])
+            for i, value in zip(retry, flipped):
+                steps[i], values[i] = -steps[i], value
+        columns = [np.zeros_like(base) if v is None else (v - base) / h for v, h in zip(values, steps)]
+        return np.column_stack(columns)
 
     def run(self, max_evaluations: int = 20):
         t0 = time.time()

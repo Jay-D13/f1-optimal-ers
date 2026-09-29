@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from calibration.dataset import good_rounds, lap_distances
 from calibration.fit import Fit
 from calibration.model import PARAMETERS, car_for, start_values
+from calibration.practice import bound_curvature
 from models import F1TrackModel
 from models.geometry import TrackGeometry
 
@@ -40,6 +41,19 @@ class DatasetTests(unittest.TestCase):
         s = lap_distances(xy, np.full(len(seconds), 50.0), seconds, track)
         self.assertLess(np.abs(s - s_true).max(), 3.0)
         self.assertTrue(np.all(np.diff(s) > 0))
+
+
+class PracticeBoundTests(unittest.TestCase):
+    def test_curvature_is_capped_only_where_the_speeds_need_more_than_g_max(self):
+        track = circle_track(radius=500.0)                         # κ = 0.002
+        speed = np.full(len(track.track_data.s), 50.0)
+        speed[:100] = 120.0                                        # 120² · 0.002 / 9.81 = 2.9 g
+        kept = bound_curvature(track, speed, g_max=2.0)
+        td = track.track_data
+        np.testing.assert_allclose(td.curvature[:100], 2.0 * 9.81 / 120.0**2)
+        np.testing.assert_allclose(td.radius[:100], 1.0 / (2.0 * 9.81 / 120.0**2 + 1e-6))
+        np.testing.assert_allclose(td.curvature[100:], 0.002)
+        self.assertTrue(np.all(kept[100:] == 1.0))
 
 
 class ModelTests(unittest.TestCase):
