@@ -32,7 +32,7 @@ class AppConfig:
     plot: bool = True
     save_animation: bool = False
     solver: Literal["nlp"] = "nlp"
-    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
+    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "trapezoidal"
     nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto"
     ipopt_linear_solver: str = "mumps"
     ipopt_hessian: Literal["limited-memory", "exact"] = "exact"
@@ -81,7 +81,7 @@ def cli(
 
     # ── Solver ────────────────────────────────────────────────────
     solver: Annotated[str, typer.Option(help="Solver type (nlp)")] = "nlp",
-    collocation: Annotated[str, typer.Option(help="Integration: euler, trapezoidal, hermite_simpson")] = "euler",
+    collocation: Annotated[str, typer.Option(help="Integration: trapezoidal (default), hermite_simpson, euler (rough: applies each node's control over its whole interval)")] = "trapezoidal",
     nlp_solver: Annotated[str, typer.Option(help="NLP backend: auto (= ipopt), ipopt, fatrop, sqpmethod")] = "auto",
     ipopt_linear_solver: Annotated[str, typer.Option(help="Ipopt linear solver (e.g. mumps, ma97)")] = "mumps",
     ipopt_hessian: Annotated[str, typer.Option(help="Ipopt Hessian: exact, or limited-memory (faster but can stop far from the optimum)")] = "exact",

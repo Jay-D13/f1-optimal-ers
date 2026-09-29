@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -182,8 +183,9 @@ def main(args):
     
     print(f"   Track loaded: {track.total_length:.0f}m, {len(track.segments)} segments")
     print(f"   Driver for telemetry: {driver}")
-    
-    v_max = track.compute_speed_limits(vehicle_config)
+    if track.air_density is not None:
+        vehicle_config = replace(vehicle_config, rho_air=track.air_density)
+        print(f"   Air density from session weather: {track.air_density:.3f} kg/m³")
 
     # =========================================================================
     print("\n" + "="*70)
@@ -203,7 +205,7 @@ def main(args):
     fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
     velocity_profile_no_ers = fb_solver.solve(flying_lap=args.flying_lap)
 
-    print(f"\n   Computing theoretical profile WITH ERS (Flying: {args.flying_lap})...")
+    print(f"\n   Computing profile WITH ERS at full power, no energy limit (Flying: {args.flying_lap})...")
     fb_solver.use_ers_power = True
     velocity_profile_with_ers = fb_solver.solve(flying_lap=args.flying_lap)
     
@@ -246,7 +248,7 @@ def main(args):
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
         optimal_trajectory = nlp_solver.solve(
-            v_limit_profile=velocity_profile_with_ers.v,
+            v_guess=velocity_profile_no_ers.v,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
             is_flying_lap=args.flying_lap,
@@ -263,7 +265,7 @@ def main(args):
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
         optimal_trajectory = nlp_solver.solve(
-            v_limit_profile=velocity_profile_with_ers.v,
+            v_guess=velocity_profile_no_ers.v,
             n_laps=args.laps,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
@@ -311,12 +313,12 @@ def main(args):
 
         LAP TIME PERFORMANCE:
         Total Time (No ERS):    {total_time_no_ers:.3f} s
-        Total Time (With ERS):  {total_time_with_ers:.3f} s
+        Total Time (Full ERS, no energy limit): {total_time_with_ers:.3f} s
         Total Time (Optimal):   {total_time_optimal:.3f} s
         Avg Lap (Optimal):      {total_time_optimal / n_laps:.3f} s
         
         Improvement vs No ERS:  {improvement:.3f} s ({improvement_pct:.2f}%)
-        Gap to Theoretical:     {gap_to_theoretical:.3f} s
+        Gap to Full-ERS Lap:    {gap_to_theoretical:.3f} s (that lap ignores the energy limits)
 
         SOLVER INFORMATION:
         Status:                 {optimal_trajectory.solver_status}

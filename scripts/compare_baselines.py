@@ -133,7 +133,6 @@ def compare_all_baselines():
     print("\nRunning Offline Optimal (NLP)...")
     optimizer = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
     optimal_trajectory = optimizer.solve(
-        v_limit_profile=ref_profile_fast.v,
         initial_soc=initial_soc,
         final_soc_min=0.3,
         is_flying_lap=False

@@ -48,6 +48,15 @@ class OptimalTrajectory:
     tire_mu_scale_front: Optional[np.ndarray] = None
     tire_mu_scale_rear: Optional[np.ndarray] = None
 
+    # Optional per-interval controls and per-node grip usage (NLP solutions)
+    P_deploy_opt: Optional[np.ndarray] = None      # MGU-K deploy power (W)
+    P_harvest_opt: Optional[np.ndarray] = None     # MGU-K harvest power (W)
+    brake_front_opt: Optional[np.ndarray] = None   # Front brake force (fraction of max_brake_force)
+    brake_rear_opt: Optional[np.ndarray] = None    # Rear brake force (fraction of max_brake_force)
+    grip_usage_front: Optional[np.ndarray] = None  # Front friction-ellipse usage (≤ 1 within grip)
+    grip_usage_rear: Optional[np.ndarray] = None   # Rear friction-ellipse usage
+    node_controls: Optional[Dict] = None           # NLP controls at the nodes (and Hermite-Simpson midpoints)
+
     def get_reference_at_distance(self, distance: float) -> Dict:
         """reference values at given distance (with lap wrapping)."""
         lap_length = self.lap_length if self.lap_length is not None else self.s[-1]
@@ -140,11 +149,11 @@ class BaseSolver(ABC):
         pass
     
     @abstractmethod
-    def solve(self, 
-              v_limit_profile: np.ndarray,
+    def solve(self,
+              v_guess: Optional[np.ndarray] = None,
               initial_soc: float = 0.5,
               final_soc_min: float = 0.3,
-              energy_limit: float = 4e6) -> OptimalTrajectory:
+              is_flying_lap: bool = True) -> OptimalTrajectory:
 
         pass
     

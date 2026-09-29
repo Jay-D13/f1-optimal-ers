@@ -13,6 +13,8 @@ from typing import List, Optional, Tuple
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d, UnivariateSpline
 
+from models.car import air_density
+
 @dataclass
 class TrackSegment:
     """Represents a segment of the track"""
@@ -49,9 +51,6 @@ class TrackData:
     x: np.ndarray
     y: np.ndarray
     
-    # Speed limits (computed with vehicle model)
-    v_max_corner: np.ndarray
-    
     # Track features
     sector: np.ndarray
     is_braking_zone: np.ndarray
@@ -84,6 +83,9 @@ class F1TrackModel:
         
         # Source info
         self.data_source: str = 'none'
+
+        # Air density from the session's weather (kg/m³), when the session has weather data
+        self.air_density: Optional[float] = None
         
     def load_from_tumftm_raceline(self, raceline_path: str,
                                    track_params: Optional[dict] = None):
@@ -157,6 +159,14 @@ class F1TrackModel:
         ff1.Cache.enable_cache('./data/cache')
         session = ff1.get_session(self.year, self.gp, self.session_type)
         session.load()
+
+        weather = getattr(session, 'weather_data', None)
+        if weather is not None and len(weather) > 0:
+            self.air_density = air_density(
+                float(weather['AirTemp'].median()),
+                float(weather['Pressure'].median()),
+                float(weather['Humidity'].median()),
+            )
         
         if driver:
             lap = session.laps.pick_driver(driver).pick_fastest()
@@ -350,32 +360,10 @@ class F1TrackModel:
             gradient=gradient,
             x=x,
             y=y,
-            v_max_corner=np.zeros(n),  # Computed later with vehicle
             sector=sector,
             is_braking_zone=is_braking,
             is_acceleration_zone=is_accel,
         )
-    
-    def compute_speed_limits(self, vehicle_config, tire_params=None) -> np.ndarray:
-        if self.track_data is None:
-            raise RuntimeError("Track data not loaded")
-        
-        # Initialize tire params if not passed
-        # (Assuming you can import TireParameters or it's attached to vehicle_config)
-        # Ideally, pass the tire_params object that matches your vehicle model
-        if tire_params is None:
-            # If TireParameters is in vehicle.py, you might need to import it
-            from config import TireParameters 
-            tire_params = TireParameters()
-            
-        v_max = np.zeros(self.track_data.n_points)
-        
-        for i, radius in enumerate(self.track_data.radius):
-            # Pass the tire params here
-            v_max[i] = vehicle_config.get_max_cornering_speed(radius, tire_params)
-        
-        self.track_data.v_max_corner = v_max
-        return v_max
     
     def get_interpolators(self) -> dict:
         """Create interpolation functions for continuous access to track properties"""

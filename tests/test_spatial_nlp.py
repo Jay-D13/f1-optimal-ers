@@ -20,24 +20,29 @@ RACELINES = Path(__file__).resolve().parents[1] / "data" / "racelines"
 
 # Optimal Monza lap (bundled raceline, 2025 rules, trapezoidal, ds = 5 m) for the current physics.
 # Update it only when the physics change on purpose.
-MONZA_2025_LAP = 79.7745
+MONZA_2025_LAP = 81.7809
 
 
-def solve_tumftm(track_name, regulations, ds=5.0, collocation="trapezoidal", n_laps=1, track_ds=None, **solve_kwargs):
-    """Same pipeline as main.py: forward-backward speed envelope, then the NLP. The track grid defaults to ds."""
+def make_solver(track_name, regulations, ds=5.0, collocation="trapezoidal", n_laps=1, track_ds=None):
+    """The NLP solver for a bundled track, as in main.py. The track grid defaults to ds."""
     ers_config = get_ers_config(regulations)
     vehicle_config = get_vehicle_config(regulations, base=get_track_config(track_name))
     track = F1TrackModel(year=2024, gp=track_name, ds=track_ds or ds)
     track.load_from_tumftm_raceline(str(find_tumftm_raceline(track_name, RACELINES)))
     vehicle_model = VehicleDynamicsModel(vehicle_config, ers_config)
-    v_limit = ForwardBackwardSolver(vehicle_model, track, use_ers_power=True).solve(flying_lap=True).v
 
     solver_class = SpatialNLPSolver if n_laps == 1 else MultiLapSpatialNLPSolver
     solver = solver_class(vehicle_model, track, ers_config, ds=ds, collocation_method=collocation)
     solver.verbose = False
+    return solver
+
+
+def solve_tumftm(track_name, regulations, ds=5.0, collocation="trapezoidal", n_laps=1, track_ds=None, **solve_kwargs):
+    """Solve a bundled track. The initial guess is the forward-backward profile without ERS."""
+    solver = make_solver(track_name, regulations, ds, collocation, n_laps, track_ds)
     if n_laps > 1:
         solve_kwargs["n_laps"] = n_laps
-    return solver.solve(v_limit, **solve_kwargs)
+    return solver.solve(**solve_kwargs)
 
 
 class DeployPowerLimitTests(unittest.TestCase):
@@ -60,11 +65,27 @@ class SpatialNLPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.ers = get_ers_config("2025")
-        cls.trajectory = solve_tumftm("Monza", "2025")
+        cls.solver = make_solver("Monza", "2025")
+        cls.trajectory = cls.solver.solve()
 
     def test_reference_lap(self):
         self.assertEqual(self.trajectory.solver_status, "optimal")
         self.assertAlmostEqual(self.trajectory.lap_time, MONZA_2025_LAP, delta=0.005)
+
+    def test_grip_limits_hold_at_the_nodes(self):
+        for usage in (self.trajectory.grip_usage_front, self.trajectory.grip_usage_rear):
+            self.assertLessEqual(usage.max(), 1.0 + 1e-6)
+        # Grip is what limits the corners: some node is at the limit on each axle
+        self.assertGreater(self.trajectory.grip_usage_front.max(), 0.999)
+        self.assertGreater(self.trajectory.grip_usage_rear.max(), 0.999)
+
+    def test_reintegrated_controls_reproduce_the_lap(self):
+        # Replay the optimal controls through the car model on a 10x finer grid
+        replay = self.solver.reintegrate(self.trajectory, substeps=10)
+        self.assertLess(abs(replay["lap_time"] - self.trajectory.lap_time), 0.05)
+        self.assertLess(max(replay["max_usage_front"], replay["max_usage_rear"]), 1.05)
+        v_replay = np.interp(self.trajectory.s, replay["s"], replay["v"])
+        self.assertLess(np.max(np.abs(v_replay - self.trajectory.v_opt)), 1.0)   # m/s
 
     def test_energy_limits(self):
         self.assertLessEqual(self.trajectory.energy_recovered, self.ers.recovery_limit_per_lap + 1.0)
@@ -81,15 +102,52 @@ class SpatialNLPTests(unittest.TestCase):
         self.assertAlmostEqual(stored, moved, delta=1e3)  # J
 
     def test_grid_refinement(self):
-        # Halve the NLP step on a fixed track grid. The track grid also moves the speed envelope
-        # that bounds the NLP (up to 0.11 % at Spa), which is a separate effect.
+        # Halve the NLP step on a fixed track grid. The lap time converges at first order, because braking
+        # and deployment switch abruptly and a switch can only move by whole nodes (BUGS.md SOL-13):
+        # 5 -> 2.5 m adds ~0.11 %, 2.5 -> 1.25 m ~0.05 %.
         coarse = solve_tumftm("Monza", "2025", ds=5.0, track_ds=1.25)
         fine = solve_tumftm("Monza", "2025", ds=2.5, track_ds=1.25)
-        self.assertLess(abs(fine.lap_time - coarse.lap_time) / coarse.lap_time, 1e-3)
+        self.assertLess(abs(fine.lap_time - coarse.lap_time) / coarse.lap_time, 1.5e-3)
 
     def test_failed_solve_raises(self):
         with self.assertRaises(SolverError):
             solve_tumftm("Monza", "2025", final_soc_min=0.95)  # Above max_soc: infeasible
+
+
+class _Track:
+    """Minimal track: constant radius, flat."""
+
+    class _Data:
+        pass
+
+    def __init__(self, radius: float, length: float, ds: float = 5.0):
+        n = int(length / ds)
+        data = self._Data()
+        data.s = np.arange(n) * ds
+        data.radius = np.full(n, radius)
+        data.gradient = np.zeros(n)
+        data.ds = ds
+        data.total_length = n * ds
+        self.track_data = data
+        self.total_length = data.total_length
+
+
+class ConstantRadiusTests(unittest.TestCase):
+    """On a circle, the optimal lap holds the steady cornering speed of the car model."""
+
+    def test_circle(self):
+        ers_config = get_ers_config("2025")
+        vehicle_model = VehicleDynamicsModel(get_vehicle_config("2025"), ers_config)
+        track = _Track(radius=100.0, length=2 * np.pi * 100.0)
+        solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
+        solver.verbose = False
+        trajectory = solver.solve()
+
+        v_corner = ForwardBackwardSolver(vehicle_model, track)._cornering_speeds(
+            np.array([0.01]), np.zeros(1), np.zeros(1)
+        )[0]
+        np.testing.assert_allclose(trajectory.v_opt, v_corner, rtol=1e-4)
+        self.assertAlmostEqual(trajectory.lap_time, track.total_length / v_corner, delta=1e-3)
 
 
 class MultiLapTests(unittest.TestCase):
