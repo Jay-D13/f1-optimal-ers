@@ -54,7 +54,13 @@ class VehicleConfig:
     # ==================== Braking ====================
     max_brake_force: float = 50_000  # [N] Total braking force
     brake_balance_front: float = 0.6  # [-] Front share of a single brake command (simulator; the NLP splits freely)
-    
+
+    # ==================== Pedal rates ====================
+    # Shortest time for a full pedal travel (0 to 1 or back) in the NLP; None = instant. Starting values,
+    # not calibrated: FastF1's ~4 Hz car data is too coarse to measure them (Phase 4)
+    throttle_rise_time: Optional[float] = 0.15  # [s]
+    brake_rise_time: Optional[float] = 0.15     # [s] Full travel = max_brake_force
+
     # ==================== Physical Constants ====================
     g: float = 9.81               # [m/s²] Gravitational acceleration
     

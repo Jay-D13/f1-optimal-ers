@@ -551,6 +551,25 @@ class SpatialNLPSolver(BaseSolver):
                     change = (W[i + 1] - W[i]) * 0.5 * (V[i] + V[i + 1])
                     opti.subject_to(opti.bounded(-max_step, change, max_step))
 
+        # Pedal rates: throttle and total brake take at least their rise time for a full travel, |du/dt| ≤ 1/T,
+        # so |du| ≤ h/(T·v) between neighbouring points h apart. Without them, minimum time switches from full
+        # throttle to the grip-limited brake within one node.
+        veh = self.vehicle.vehicle
+        for rise, pedal in ((veh.throttle_rise_time, lambda u: u["THROTTLE"]),
+                            (veh.brake_rise_time, lambda u: u["BRAKE_F"] + u["BRAKE_R"])):
+            if not rise:
+                continue
+            p = pedal(U)
+            if U_MID:
+                # Node -> midpoint -> node, each half an interval
+                p_mid, max_step = pedal(U_MID), 0.5 * self.ds / rise
+                steps = [((p_mid - p[:-1]), 0.5 * (V[:-1] + V_MID)), ((p[1:] - p_mid), 0.5 * (V_MID + V[1:]))]
+            else:
+                max_step = self.ds / rise
+                steps = [((p[1:] - p[:-1]), 0.5 * (V[:-1] + V[1:]))]
+            for change, v_avg in steps:
+                opti.subject_to(opti.bounded(-max_step, change * v_avg, max_step))
+
         # Ramp-down at full throttle (C5.12.4-7, REG-6), inside the full-throttle runs found by a first solve.
         # A floor state tracks the ERS-K deploy above the release level: the deploy may sit at most one first
         # step below the floor, and the floor falls at most at the ramp rate. Cuts the deploy curve forces are

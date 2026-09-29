@@ -20,7 +20,7 @@ RACELINES = Path(__file__).resolve().parents[1] / "data" / "racelines"
 
 # Optimal Monza lap (bundled raceline, 2025 rules, trapezoidal, ds = 5 m) for the current physics.
 # Update it only when the physics change on purpose.
-MONZA_2025_LAP = 81.7809
+MONZA_2025_LAP = 81.7815
 
 
 def make_solver(track_name, regulations, ds=5.0, collocation="trapezoidal", n_laps=1, track_ds=None):
@@ -143,6 +143,16 @@ class SpatialNLPTests(unittest.TestCase):
         # Grip is what limits the corners: some node is at the limit on each axle
         self.assertGreater(self.trajectory.grip_usage_front.max(), 0.999)
         self.assertGreater(self.trajectory.grip_usage_rear.max(), 0.999)
+
+    def test_pedal_rates(self):
+        # A full throttle or brake travel takes at least the rise time, and the limits bind at the braking points
+        t, nodes, car = self.trajectory, self.trajectory.node_controls, self.solver.vehicle.vehicle
+        dt = self.solver.ds / (0.5 * (t.v_opt[1:] + t.v_opt[:-1]))
+        pedals = ((nodes["throttle"], car.throttle_rise_time), (nodes["brake_front"] + nodes["brake_rear"], car.brake_rise_time))
+        for pedal, rise in pedals:
+            rate = np.abs(np.diff(pedal)) / dt
+            self.assertLessEqual(rate.max(), (1.0 + 1e-6) / rise)
+            self.assertGreater(rate.max(), 0.99 / rise)
 
     def test_reintegrated_controls_reproduce_the_lap(self):
         # Replay the optimal controls through the car model on a 10x finer grid
