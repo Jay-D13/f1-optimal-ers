@@ -17,6 +17,8 @@ export interface SimulationParams {
     year?: number;
     laps: number;
     regulations: '2025' | '2026';
+    session: 'qualifying' | 'race';
+    event?: string;
     initial_soc: number;
     final_soc_min: number;
     per_lap_final_soc_min?: number;

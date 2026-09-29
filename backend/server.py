@@ -32,6 +32,8 @@ class SimulationRequest(BaseModel):
     year: int = Field(default=2024, ge=2018)
     laps: int = Field(default=1, ge=1)
     regulations: Literal["2025", "2026"] = "2025"
+    session: Literal["qualifying", "race"] = "qualifying"
+    event: Optional[str] = None
     initial_soc: float = Field(default=0.5, ge=0.0, le=1.0)
     final_soc_min: float = Field(default=0.3, ge=0.0, le=1.0)
     per_lap_final_soc_min: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -60,6 +62,7 @@ def _build_simulation_command(req: SimulationRequest) -> list[str]:
         "--year", str(req.year),
         "--laps", str(req.laps),
         "--regulations", req.regulations,
+        "--session", req.session,
         "--initial-soc", str(req.initial_soc),
         "--final-soc-min", str(req.final_soc_min),
         "--ds", str(req.ds),
@@ -86,6 +89,9 @@ def _build_simulation_command(req: SimulationRequest) -> list[str]:
 
     if req.driver:
         cmd.extend(["--driver", req.driver])
+
+    if req.event:
+        cmd.extend(["--event", req.event])
 
     return cmd
 

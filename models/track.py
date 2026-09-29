@@ -1,17 +1,24 @@
 """
 Supports:
-1. FastF1 telemetry (GPS-derived curvature)
+1. FastF1 telemetry: a geometry fitted to every clean lap of a session (models/telemetry.py)
 2. TUMFTM minimum curvature racelines
-3. Manual track definitions
+3. A fitted TrackGeometry (models/geometry.py)
 """
 import numpy as np
 import pandas as pd
-import fastf1 as ff1
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
-from scipy.signal import savgol_filter
+
 from scipy.interpolate import interp1d, UnivariateSpline
+
+from models.car import air_density
+from config.events import find_event_2026
+from models.telemetry import corner_distances, load_session, place_raceline, session_geometry, zone_intervals
+
+# Largest distance (m) between a raceline and the session's map line before the layout counts as changed
+MAX_RACELINE_GAP = 15.0
 
 @dataclass
 class TrackSegment:
@@ -24,6 +31,7 @@ class TrackSegment:
     x: float = 0.0             # GPS X coordinate
     y: float = 0.0             # GPS Y coordinate
     sector: int = 1            # Track sector (1, 2, or 3)
+    vertical_curvature: float = 0.0  # d(gradient)/ds (1/m): positive in a dip, negative over a crest
     
     @property
     def is_straight(self) -> bool:
@@ -49,13 +57,11 @@ class TrackData:
     x: np.ndarray
     y: np.ndarray
     
-    # Speed limits (computed with vehicle model)
-    v_max_corner: np.ndarray
-    
     # Track features
     sector: np.ndarray
     is_braking_zone: np.ndarray
     is_acceleration_zone: np.ndarray
+    vertical_curvature: Optional[np.ndarray] = None   # d(gradient)/ds (1/m); None on flat loaders
 
 
 def find_tumftm_raceline(track: str, directory: str | Path = "data/racelines") -> Optional[Path]:
@@ -84,6 +90,12 @@ class F1TrackModel:
         
         # Source info
         self.data_source: str = 'none'
+
+        # Air density from the session's weather (kg/m³), when the session has weather data
+        self.air_density: Optional[float] = None
+
+        # FIA Straight Mode zones as (start, end) lap distances (m), when known (2026 FastF1 tracks)
+        self.straight_mode_zones: Optional[List[Tuple[float, float]]] = None
         
     def load_from_tumftm_raceline(self, raceline_path: str,
                                    track_params: Optional[dict] = None):
@@ -151,117 +163,114 @@ class F1TrackModel:
         print(f"   ✓ Loaded {n_points} points, {self.total_length:.0f}m total")
         return self
         
-    def load_from_fastf1(self, driver: Optional[str] = None):
-        """Load track data from FastF1 API's telemetry"""
-        
-        ff1.Cache.enable_cache('./data/cache')
-        session = ff1.get_session(self.year, self.gp, self.session_type)
-        session.load()
-        
-        if driver:
-            lap = session.laps.pick_driver(driver).pick_fastest()
-        else:
-            lap = session.laps.pick_fastest()
-            
-        telemetry = lap.get_telemetry()
-        self.telemetry_data = telemetry  # Store for visualization
-        
-        # Extract data
-        x = telemetry['X'].values
-        y = telemetry['Y'].values
-        distances = telemetry['Distance'].values
-        speeds = telemetry['Speed'].values
-        
-        # Clean NaNs
-        valid = ~(np.isnan(x) | np.isnan(y) | np.isnan(distances))
-        x, y, distances = x[valid], y[valid], distances[valid]
-        speeds = speeds[valid] if len(speeds) == len(valid) else speeds[~np.isnan(speeds)]
-        
-        self.total_length = distances[-1]
-        
-        # Compute curvature with smoothing
-        curvature = self._compute_curvature_smoothed(x, y, distances, speeds)
-        radius = 1.0 / (np.abs(curvature) + 1e-6)
-        radius = np.clip(radius, 10, 10000)
-        
-        # Resample to uniform ds
+    def load_from_geometry(self, geometry):
+        """
+        Load a track from a fitted TrackGeometry (models/geometry.py): the driven line with its curvature and
+        gradient, resampled at ds by averaging over each step so that short curvature peaks are kept.
+        """
+        print(f"   Loading fitted geometry ({geometry.source or 'unnamed'})...")
+        self.total_length = geometry.length
         s_uniform = np.arange(0, self.total_length, self.ds)
         n_points = len(s_uniform)
-        
-        x_interp = np.interp(s_uniform, distances, x)
-        y_interp = np.interp(s_uniform, distances, y)
-        radius_interp = np.interp(s_uniform, distances, radius)
-        curvature_interp = np.interp(s_uniform, distances, curvature)
-        
-        # Build segments
-        self.segments = []
-        for i in range(n_points):
-            segment = TrackSegment(
-                distance=s_uniform[i],
-                length=self.ds,
-                radius=radius_interp[i],
-                curvature=curvature_interp[i],
-                gradient=0.0,
-                x=x_interp[i],
-                y=y_interp[i],
-                sector=self._get_sector(s_uniform[i]),
+
+        def cell_mean(values):
+            # Mean over [s - ds/2, s + ds/2] via the periodic running integral on the fine grid
+            closed_s = np.append(geometry.s, geometry.length)
+            closed_v = np.append(values, values[0])
+            integral = np.concatenate([[0.0], np.cumsum(0.5 * (closed_v[1:] + closed_v[:-1]) * np.diff(closed_s))])
+            total = integral[-1]
+
+            def running(x):
+                laps, rest = np.divmod(x, geometry.length)
+                return laps * total + np.interp(rest, closed_s, integral)
+
+            return (running(s_uniform + 0.5 * self.ds) - running(s_uniform - 0.5 * self.ds)) / self.ds
+
+        curvature = cell_mean(geometry.kappa)
+        radius = np.clip(1.0 / (np.abs(curvature) + 1e-6), 10, 10000)
+        gradient = cell_mean(geometry.gradient)
+        vertical_curvature = cell_mean(geometry.kappa_v)
+        x = np.interp(s_uniform, geometry.s, geometry.x)
+        y = np.interp(s_uniform, geometry.s, geometry.y)
+
+        self.segments = [
+            TrackSegment(
+                distance=s_uniform[i], length=self.ds, radius=radius[i], curvature=curvature[i],
+                gradient=gradient[i], x=x[i], y=y[i], sector=self._get_sector(s_uniform[i]),
+                vertical_curvature=vertical_curvature[i],
             )
-            self.segments.append(segment)
-        
+            for i in range(n_points)
+        ]
         self._create_track_arrays()
+        self.data_source = 'geometry'
+        print(f"   ✓ Loaded {n_points} points, {self.total_length:.0f}m total")
+        return self
+
+    def load_from_fastf1(self, driver: Optional[str] = None, refresh: bool = False, raceline: Optional[str] = None):
+        """
+        Load the track from a FastF1 session: the line fitted to every clean lap (models/telemetry.py), or with
+        raceline, a TUM raceline file placed onto that line, which gives it the session's height, timing line
+        and Straight Mode zones. The live-timing positions are snapped to the provider's map line, which is not
+        the line the cars drive (TRK-10), so the raceline is the better path where its layout is current.
+        The fastest lap (or the driver's) is kept in telemetry_data for plots and comparisons.
+        """
+        session, round_number, location = load_session(self.year, self.gp, self.session_type)
+        print(f"   {self.year} round {round_number}: {session.event['EventName']} ({location}), session {self.session_type}")
+
+        weather = getattr(session, 'weather_data', None)
+        if weather is not None and len(weather) > 0:
+            self.air_density = air_density(
+                float(weather['AirTemp'].median()),
+                float(weather['Pressure'].median()),
+                float(weather['Humidity'].median()),
+            )
+
+        laps = session.laps.pick_drivers(driver) if driver else session.laps
+        lap = laps.pick_fastest()
+        self.telemetry_data = lap.get_telemetry()
+
+        geometry = session_geometry(self.year, self.gp, self.session_type, refresh=refresh, loaded_session=session)
         self.data_source = 'fastf1'
-        
-        print(f"   ✓ Loaded {n_points} points from FastF1")
+        if raceline is not None:
+            xy = np.loadtxt(raceline, delimiter=',', comments='#')[:, :2]
+            placed, gap = place_raceline(xy, geometry, source=f"{Path(raceline).name} on {geometry.source}")
+            if gap > MAX_RACELINE_GAP:
+                raise ValueError(
+                    f"{raceline} is up to {gap:.0f} m from the {self.year} layout: the circuit has changed since"
+                )
+            print(f"   Raceline {Path(raceline).name} placed on the session (largest gap {gap:.1f} m)")
+            geometry = placed
+            self.data_source = 'tumftm+fastf1'
+        self.load_from_geometry(geometry)
+
+        event = find_event_2026(round_number) if self.year == 2026 else None
+        if raceline is None:
+            hint = f" (--use-tumftm places the current raceline, {event.raceline})" if event and event.raceline else (
+                " (no current raceline for this layout yet)" if event else "")
+            print(f"   ⚠ FastF1 map line, not the driven line: its curvature can be off by metres (TRK-10){hint}")
+        if event is not None and event.straight_mode_zones:
+            corners = corner_distances(session, geometry)
+            if corners is None:
+                print("   ⚠ No corner markers in FastF1: Straight Mode zones fall back to the radius heuristic")
+            else:
+                self.straight_mode_zones = zone_intervals(event.straight_mode_zones, corners, geometry.length)
+                spans = ", ".join(f"{a:.0f}–{b:.0f}" for a, b in self.straight_mode_zones)
+                print(f"   Straight Mode zones (m): {spans}")
+        elif event is not None:
+            self.straight_mode_zones = []
         return self, lap['Driver']
 
-    def _compute_curvature_smoothed(self, 
-                                    x: np.ndarray, 
-                                    y: np.ndarray, 
-                                    distances: np.ndarray, 
-                                    speeds: np.ndarray
-                                ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Compute curvature using hybrid method (GPS geometry + speed limits) -> physics basically
-        """
-        # Smooth coordinates
-        window = min(15, len(x) // 10)
-        if window % 2 == 0:
-            window += 1
-        window = max(window, 5)
-        
-        x_smooth = savgol_filter(x, window, 3)
-        y_smooth = savgol_filter(y, window, 3)
-        
-        # Compute curvature from heading changes
-        dx = np.gradient(x_smooth)
-        dy = np.gradient(y_smooth)
-        heading = np.arctan2(dy, dx)
-        heading = np.unwrap(heading)
-        
-        ds = np.gradient(distances)
-        ds = np.maximum(ds, 0.1)
-        
-        d_heading = np.gradient(heading)
-        curvature_gps = d_heading / ds
-        
-        # Smooth curvature
-        curvature_gps = savgol_filter(curvature_gps, window, 3)
-        
-        # Physics-based bound from speed
-        # v²/R = a_lat -> R = v²/a_lat -> κ = a_lat/v²
-        # gonna assume max 4G lateral cause sometimes in life... you just gotta pick a number
-        g = 9.81
-        a_lat_max = 4.0 * g
-        speeds_ms = speeds / 3.6 if np.mean(speeds) > 50 else speeds
-        speeds_ms = np.maximum(speeds_ms, 10)
-        
-        kappa_physics_max = a_lat_max / speeds_ms**2
-        
-        # bound GPS curvature by physics
-        curvature = np.sign(curvature_gps) * np.minimum(np.abs(curvature_gps), kappa_physics_max)
-        
-        return curvature
-    
+    def straight_mode_mask(self, s) -> Optional[np.ndarray]:
+        """1.0 where lap distance s lies in an FIA Straight Mode zone, else 0.0; None when the zones are unknown."""
+        if self.straight_mode_zones is None:
+            return None
+        s = np.mod(np.asarray(s, dtype=float), self.total_length)
+        mask = np.zeros_like(s)
+        for start, end in self.straight_mode_zones:
+            inside = (s >= start) & (s <= end) if start <= end else (s >= start) | (s <= end)
+            mask[inside] = 1.0
+        return mask
+
     def _compute_curvature_spline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
         cleaner than finite differences
@@ -320,6 +329,7 @@ class F1TrackModel:
         x = np.array([seg.x for seg in self.segments])
         y = np.array([seg.y for seg in self.segments])
         sector = np.array([seg.sector for seg in self.segments])
+        vertical_curvature = np.array([seg.vertical_curvature for seg in self.segments])
         
         # Identify braking/acceleration zones
         is_braking = np.zeros(n, dtype=bool)
@@ -350,32 +360,11 @@ class F1TrackModel:
             gradient=gradient,
             x=x,
             y=y,
-            v_max_corner=np.zeros(n),  # Computed later with vehicle
             sector=sector,
             is_braking_zone=is_braking,
             is_acceleration_zone=is_accel,
+            vertical_curvature=vertical_curvature,
         )
-    
-    def compute_speed_limits(self, vehicle_config, tire_params=None) -> np.ndarray:
-        if self.track_data is None:
-            raise RuntimeError("Track data not loaded")
-        
-        # Initialize tire params if not passed
-        # (Assuming you can import TireParameters or it's attached to vehicle_config)
-        # Ideally, pass the tire_params object that matches your vehicle model
-        if tire_params is None:
-            # If TireParameters is in vehicle.py, you might need to import it
-            from config import TireParameters 
-            tire_params = TireParameters()
-            
-        v_max = np.zeros(self.track_data.n_points)
-        
-        for i, radius in enumerate(self.track_data.radius):
-            # Pass the tire params here
-            v_max[i] = vehicle_config.get_max_cornering_speed(radius, tire_params)
-        
-        self.track_data.v_max_corner = v_max
-        return v_max
     
     def get_interpolators(self) -> dict:
         """Create interpolation functions for continuous access to track properties"""

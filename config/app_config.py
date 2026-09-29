@@ -32,11 +32,13 @@ class AppConfig:
     plot: bool = True
     save_animation: bool = False
     solver: Literal["nlp"] = "nlp"
-    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
+    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "trapezoidal"
     nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto"
     ipopt_linear_solver: str = "mumps"
     ipopt_hessian: Literal["limited-memory", "exact"] = "exact"
     regulations: Literal["2025", "2026"] = "2025"
+    session: Literal["qualifying", "race"] = "qualifying"
+    event: str | None = None
 
 
 def _load_yaml_defaults(path: Path) -> dict:
@@ -56,7 +58,7 @@ def cli(
     track: Annotated[str, typer.Option(help="Grand Prix name (e.g. Monaco, Monza, Spa)")] = "Monaco",
     year: Annotated[int, typer.Option(help="Season year for FastF1 telemetry")] = 2024,
     driver: Annotated[Optional[str], typer.Option(help="Driver code for telemetry (e.g. VER, LEC)")] = None,
-    use_tumftm: Annotated[bool, typer.Option("--use-tumftm/--no-use-tumftm", help="Prefer TUMFTM raceline over FastF1")] = False,
+    use_tumftm: Annotated[bool, typer.Option("--use-tumftm/--no-use-tumftm", help="Use the TUMFTM raceline, placed on the FastF1 session for height, timing line and Straight Mode zones")] = False,
 
     # ── Energy / SOC ──────────────────────────────────────────────
     initial_soc: Annotated[float, typer.Option(help="Battery state-of-charge at start [0-1]")] = 0.5,
@@ -68,6 +70,8 @@ def cli(
     laps: Annotated[int, typer.Option(help="Number of laps in the NLP horizon")] = 1,
     flying_lap: Annotated[bool, typer.Option("--flying-lap/--no-flying-lap", help="Continuous lap (no standing start)")] = True,
     regulations: Annotated[str, typer.Option(help="Regulation set: 2025 or 2026")] = "2025",
+    session: Annotated[str, typer.Option(help="2026 energy rules: qualifying (Overtake curve, start full, run-up from the last corner) or race")] = "qualifying",
+    event: Annotated[Optional[str], typer.Option(help="2026 round number or name for the event's energy limits (default: from --track)")] = None,
 
     # ── Tire degradation ──────────────────────────────────────────
     enable_tire_degradation: Annotated[bool, typer.Option("--enable-tire-degradation/--no-tire-degradation", help="Enable grip loss over laps")] = False,
@@ -81,7 +85,7 @@ def cli(
 
     # ── Solver ────────────────────────────────────────────────────
     solver: Annotated[str, typer.Option(help="Solver type (nlp)")] = "nlp",
-    collocation: Annotated[str, typer.Option(help="Integration: euler, trapezoidal, hermite_simpson")] = "euler",
+    collocation: Annotated[str, typer.Option(help="Integration: trapezoidal (default), hermite_simpson, euler (rough: applies each node's control over its whole interval)")] = "trapezoidal",
     nlp_solver: Annotated[str, typer.Option(help="NLP backend: auto (= ipopt), ipopt, fatrop, sqpmethod")] = "auto",
     ipopt_linear_solver: Annotated[str, typer.Option(help="Ipopt linear solver (e.g. mumps, ma97)")] = "mumps",
     ipopt_hessian: Annotated[str, typer.Option(help="Ipopt Hessian: exact, or limited-memory (faster but can stop far from the optimum)")] = "exact",
@@ -101,7 +105,7 @@ def cli(
         "track": track, "year": year, "driver": driver, "use_tumftm": use_tumftm,
         "initial_soc": initial_soc, "final_soc_min": final_soc_min,
         "per_lap_final_soc_min": per_lap_final_soc_min, "ds": ds, "laps": laps,
-        "flying_lap": flying_lap, "regulations": regulations,
+        "flying_lap": flying_lap, "regulations": regulations, "session": session, "event": event,
         "enable_tire_degradation": enable_tire_degradation,
         "tire_wear_rate_per_lap": tire_wear_rate_per_lap,
         "tire_min_grip_scale": tire_min_grip_scale, "tire_model": tire_model,

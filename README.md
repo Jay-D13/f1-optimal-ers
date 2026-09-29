@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <em>A physics-based optimization framework for computing lap-time-optimal ERS deployment strategies using forward-backward velocity profiling and spatial-domain nonlinear programming.</em>
+  <em>A physics-based optimization framework for computing lap-time-optimal ERS deployment strategies using a spatial-domain nonlinear program with per-axle tyre grip.</em>
 </p>
 
 ---
@@ -37,10 +37,11 @@
 
 ## Overview
 
-This project implements a **two-phase hierarchical optimization** approach for Formula 1 Energy Recovery System (ERS) strategy:
+This project computes lap-time-optimal Formula 1 Energy Recovery System (ERS) strategies on a fixed racing line:
 
-1. **Phase 1 - Velocity Profiling**: A forward-backward solver computes the physics grip limit velocity envelope using vehicle dynamics and track geometry
-2. **Phase 2 - ERS Optimization**: A spatial NLP (Nonlinear Programming) solver finds the optimal battery deployment/recovery strategy to minimize lap time
+1. **Car model** (`models/car.py`): a point mass with per-axle tyre forces (load-sensitive friction ellipses, load transfer, rear-wheel drive), aero drag and downforce, ICE and MGU-K power, and the battery. Every solver uses these same equations.
+2. **Velocity profiling**: a forward-backward pass on the car model gives a quick grip- and power-limited speed profile, used as the optimizer's initial guess and as a no-ERS reference
+3. **ERS optimization**: a spatial NLP (Nonlinear Programming) solver finds the speed, throttle, brake and battery deployment/recovery that minimize lap time, with the tyre grip limits inside the optimization
 
 The framework supports both **2025 regulations** (120kW MGU-K, 4MJ deployment limit) and **upcoming 2026 regulations** (350kW MGU-K, 8.5MJ recovery, no MGU-H).
 
@@ -60,7 +61,7 @@ The ERS system can deploy up to **4MJ per lap** but is limited in how much it ca
 ### Goals Achieved
 
 - **Validated Physics Models** - Implementation aligns with TUMFTM and Oxford academic approaches  
-- **Forward-Backward Solver** - Computes grip-limited velocity profiles within 0.1s of real driver telemetry  
+- **Forward-Backward Solver** - Grip- and power-limited speed profiles on the same car model, for the NLP's initial guess  
 - **Spatial NLP Optimization** - Direct collocation with CasADi/IPOPT for globally optimal ERS deployment (higher order of Gauss-Legendre upgrade in the works)
 - **New Regulation Support** - Compare 2025 vs 2026 powertrain regulations  
 - **Real Telemetry Integration** - Loading actual F1 data via FastF1 API  
@@ -196,7 +197,8 @@ The optimization minimizes **lap time** in the spatial domain:
 minimize    T = ∫(1/v)ds                    (lap time integral)
 
 subject to: 
-    v ≤ v_grip(s)                           (grip-limited velocity from Phase 1)
+    dv/ds = a_x(v, controls, κ(s)) / v      (car model: power, brakes, drag, rolling resistance)
+    (F_x/F_x,max)² + (F_y/F_y,max)² ≤ 1     (friction ellipse on each axle, load-sensitive)
     dSOC/ds = f(P_ers, v, η)                (battery dynamics)
     ∫ P_deploy ds ≤ 4 MJ                    (regulatory deployment limit)
     ∫ P_harvest ds ≤ 2 MJ                   (regulatory recovery limit)
@@ -208,19 +210,20 @@ subject to:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    PHASE 1: Velocity Envelope                │
+│               PHASE 1: Initial guess                         │
 │  ┌─────────────┐    ┌──────────────────┐    ┌────────────┐  │
-│  │ Track Data  │───▶│ Forward-Backward │───▶│ v_max(s)   │  │
-│  │ (curvature) │    │     Solver       │    │ profile    │  │
+│  │ Track Data  │───▶│ Forward-Backward │───▶│ v(s) guess │  │
+│  │ (curvature) │    │ (car model)      │    │ (no ERS)   │  │
 │  └─────────────┘    └──────────────────┘    └────────────┘  │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  PHASE 2: ERS Optimization                   │
+│               PHASE 2: ERS Optimization                      │
 │  ┌─────────────┐    ┌──────────────────┐    ┌────────────┐  │
-│  │ v_max(s)    │───▶│  Spatial NLP     │───▶│ Optimal    │  │
-│  │ + ERS cfg   │    │  (CasADi/IPOPT)  │    │ trajectory │  │
+│  │ v(s) guess  │───▶│  Spatial NLP     │───▶│ Optimal    │  │
+│  │ + car model │    │  (CasADi/IPOPT)  │    │ trajectory │  │
+│  │ + ERS cfg   │    │  grip inside     │    │            │  │
 │  └─────────────┘    └──────────────────┘    └────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -262,12 +265,14 @@ python main.py [OPTIONS]
 | `--ambient-temp-c` | float | `25.0` | Dynamic tire model: air temperature (°C) |
 | `--track-temp-c` | float | `35.0` | Dynamic tire model: track temperature (°C) |
 | `--tire-init-temp-c` | float | `80.0` | Dynamic tire model: tire temperature at the start (°C) |
-| `--collocation` | str | `euler` | Integration method: `euler`, `trapezoidal`, `hermite_simpson` |
+| `--collocation` | str | `trapezoidal` | Integration method: `trapezoidal`, `hermite_simpson`, `euler` |
+| `--session` | str | `qualifying` | 2026 energy rules: `qualifying` (Overtake curve, per-event recharge cap, 4 MJ window starting full, run-up from the last corner, ramp-down rules) or `race` |
+| `--event` | str | from `--track` | 2026 round number or name for the event's energy limits |
 | `--nlp-solver` | str | `auto` | NLP backend: `auto` (= `ipopt`), `ipopt`, `fatrop`, or `sqpmethod` |
 | `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |
 | `--ipopt-hessian` | str | `exact` | Ipopt Hessian mode: `exact`, or `limited-memory` (faster per iteration, but can stop seconds away from the optimum) |
 | `--flying-lap/--no-flying-lap` | flag | `True` | Continuous lap (no standing start) |
-| `--use-tumftm/--no-use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
+| `--use-tumftm/--no-use-tumftm` | flag | `False` | Use the TUMFTM raceline, placed on the FastF1 session (height, timing line, Straight Mode zones); flat if the session is unavailable or its layout has changed |
 | `--plot/--no-plot` | flag | `True` | Enable or disable visualization plots |
 | `--save-animation/--no-save-animation` | flag | `False` | Enable or disable animated lap visualization |
 | `--solver` | str | `nlp` | Solver type (nlp is fully implemented) |
@@ -330,27 +335,49 @@ The project supports two primary data sources, and **the choice significantly af
 
 ### 1. FastF1 Telemetry (Default)
 
-Real telemetry data from official F1 timing:
+A line fitted to the position samples of every clean lap of a session (all drivers). **Caveat:** the live-timing positions are snapped to the timing provider's own map of the circuit (all laps lie within about 2 cm of each other), so this is that map line, not the line the cars drive. It sits near the centreline at some circuits (Shanghai, Suzuka) and near a racing line at others (Monza, Spa), and has sharp polyline corners in places (Shanghai T16). Its elevation, timing line and corner positions are sound; its curvature is not a driven line.
 
 ```python
-track.load_from_fastf1(driver='VER')
+track.load_from_fastf1(driver='VER')   # driver only picks the lap kept for plots
 ```
 
-- **Pros**: Real GPS coordinates, actual driver speed profiles, sector times
-- **Cons**: GPS noise in curvature calculation, varies by session/driver
-- **Best for**: Comparing against real performance, specific track configurations
+- The event is found by round number or exact name (`--track 13`, `Monza`, `Catalunya`); ambiguous names such as `Spain` in 2026 stop with the list of rounds.
+- Clean laps: within 107 % of the fastest, no pit laps, no deleted laps, green track status. Frozen 2026 car-data blocks (throttle ≥ 104 with the brake on) are dropped.
+- Each coordinate is a penalised periodic spline of lap distance. The horizontal smoothing follows the speed (0.8 s of travel, at least 20 m), so noise doesn't become curvature on the straights; the elevation uses 80 m. Samples far from the fit are dropped between rounds (the height feed puts some samples on the wrong level where a track crosses itself).
+- The result has curvature, gradient and vertical curvature on a 1 m grid, starts at the timing line, and is cached in `data/cache/geometry/`.
+- For 2026 events, the FIA Straight Mode zones (`config/events.py`) are placed from FastF1's corner markers; each zone ends at the next corner.
+- Two geometries built from disjoint halves of the drivers give lap times within 0.06 % on all 15 rounds of 2026 (expected, given the snapping).
 
 ### 2. TUMFTM Racelines
 
 Minimum-curvature optimal racing lines from [TUMFTM's racetrack database](https://github.com/TUMFTM/racetrack-database):
 
 ```python
-track.load_from_tumftm_raceline('data/racelines/monaco.csv')
+track.load_from_tumftm_raceline('data/racelines/monza.csv')                    # flat, in TUM's frame
+track.load_from_fastf1(raceline='data/racelines/monza.csv')                   # placed on the FastF1 session
 ```
+
+**Which path to use for 2026:** `--use-tumftm` on the 8 rounds whose TUM layout is current (Shanghai, Suzuka, Montreal, Spielberg, Silverstone, Spa, Budapest, Monza; the `raceline` field in `config/events.py`). The other 7 (Melbourne, Barcelona, Miami, Monaco, Zandvoort, Madrid, Baku) have no current map of the driven line yet: only the FastF1 map line, whose curvature is unreliable.
+
+`--use-tumftm` places the raceline on the session: it is registered onto the FastF1 line (rotation and shift), takes that line's height, starts at its timing line, and gets the FIA Straight Mode zones. A raceline more than 15 m from the session's layout anywhere is refused: 2026 Melbourne and Barcelona have changed since the TUM data were made.
 
 - **Pros**: Smoother curvature, theoretically optimal racing line
 - **Cons**: May not match actual F1 racing line (different constraints)
 - **Best for**: Pure optimization studies, comparing strategies
+
+### Calibration (2026 qualifying, work in progress)
+
+`calibration/` fits one set of car parameters (drag and downforce areas, aero balance, Straight Mode drag, tyre grip scale, ICE power) to the 2026 pole laps of the 8 rounds with a current raceline:
+
+```python
+from calibration.dataset import reference_lap          # pole lap on the model's path, cached in data/cache/calibration
+from calibration.fit import Fit, report, print_report
+fit = Fit([2, 5, 9, 10, 13], ["c_w_a", "c_z_a", "mu_scale"])   # train rounds, parameters to fit
+params = fit.run(max_evaluations=15)                   # least squares on the speed trace and lap time
+print_report(report(params, [3, 8, 11]))               # held-out rounds
+```
+
+A round's residuals are the speed error at every measured sample (weighted like 100 samples, 8 km/h scale) and the lap-time error (0.2 s scale). Jacobians are forward differences, with the solves run in parallel. `calibration/plots.py` draws the model and measured speed traces per round. The first fits do not meet the Phase 4 targets yet (held-out lap time median 1.3 %, max 1.7 %), and push parameters to their bounds; see the roadmap.
 
 ### Critical: SOC Boundaries Affect Results Dramatically
 
@@ -519,12 +546,17 @@ Net Energy Used:        0.924 MJ
 ```
 f1-ers-optimal-control/
 ├── main.py                 # Entry point
+├── calibration/            # Phase 4: reference laps, parameter fit, diagnostics
 ├── config/
 │   ├── __init__.py
 │   ├── ers.py              # ERS regulations (2025/2026)
+│   ├── events.py           # 2026 per-event energy rules and Straight Mode zones
 │   └── vehicle.py          # Vehicle parameters, tire model
 ├── models/
 │   ├── __init__.py
+│   ├── car.py              # Car model shared by the solvers
+│   ├── geometry.py         # Closed 3D line fitted to pooled laps
+│   ├── telemetry.py        # FastF1 events, clean laps, cached geometry, Straight Mode zones
 │   ├── track.py            # Track loading (FastF1/TUMFTM)
 │   └── vehicle_dynamics.py # Physics model (CasADi)
 ├── solvers/
@@ -582,7 +614,9 @@ Based on [TUMFTM's laptime-simulation](https://github.com/TUMFTM/laptime-simulat
 
 ### Tire Model
 
-Friction circle with load-dependent coefficients:
+A friction ellipse per axle, (F_x/F_x,max)² + (F_y/F_y,max)² ≤ 1, with load-dependent coefficients per tyre.
+Axle loads include downforce and longitudinal load transfer; the axles share the lateral force by the steady
+yaw balance; traction is on the rear axle only, braking on both:
 
 ```
 μ(Fz) = μ₀ + (dμ/dFz) × (Fz - Fz₀)
@@ -625,7 +659,7 @@ x[k+1] = x[k] + (h/6)·(f[k] + 4·f_mid + f[k+1])       # Simpson quadrature
 ### Modeling Fidelity
 
 - [ ] **Dynamic Tire Model**: Upgrade the static "friction circle with load-dependent coefficients" to include thermal degradation and wear factors for multi-lap accuracy.
-- [ ] **3D Track Geometry**: Integrate elevation and banking data to improve the accuracy of the "vehicle dynamics and track geometry" constraints.
+- [x] **3D Track Geometry**: elevation (gradient and vertical curvature) from pooled telemetry. Banking is not modelled.
 
 ### Analysis & Validation
 

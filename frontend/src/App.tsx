@@ -20,6 +20,8 @@ const DEFAULT_SIM_PARAMS: SimulationParams = {
     year: 2024,
     laps: 1,
     regulations: '2025',
+    session: 'qualifying',
+    event: undefined,
     initial_soc: 0.5,
     final_soc_min: 0.3,
     per_lap_final_soc_min: undefined,

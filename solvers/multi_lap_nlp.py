@@ -30,7 +30,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
 
     def solve(
         self,
-        v_limit_profile: np.ndarray,
+        v_guess: np.ndarray | None = None,
         n_laps: int = 2,
         initial_soc: float = 0.5,
         final_soc_min: float = 0.3,
@@ -48,7 +48,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
         Solve a multi-lap ERS optimal control problem.
 
         Args:
-            v_limit_profile: Single-lap velocity limit profile from forward-backward solver.
+            v_guess: Single-lap speed profile for the initial guess (default: forward-backward without ERS).
             n_laps: Number of consecutive laps in the horizon.
             initial_soc: Starting SOC for lap 1.
             final_soc_min: Final SOC lower bound at end of last lap.
@@ -83,7 +83,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
             if dynamic_enabled:
                 self._log("Dynamic tire model is multi-lap only in this rollout; using single-lap scalar solve.")
             return super().solve(
-                v_limit_profile=v_limit_profile,
+                v_guess=v_guess,
                 initial_soc=initial_soc,
                 final_soc_min=final_soc_min,
                 is_flying_lap=is_flying_lap,
@@ -110,7 +110,7 @@ class MultiLapSpatialNLPSolver(SpatialNLPSolver):
 
         try:
             trajectory = self._build_and_solve(
-                v_limit_profile=self._sample_on_grid(v_limit_profile),
+                v_guess=self._guess_on_grid(v_guess, is_flying_lap),
                 initial_soc=initial_soc,
                 final_soc_min=final_soc_min,
                 is_flying_lap=is_flying_lap,
