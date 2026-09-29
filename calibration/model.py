@@ -2,9 +2,10 @@
 The calibration parameters, and the model's qualifying lap for a set of them on a reference lap's path.
 """
 import contextlib
+import copy
 import io
 from dataclasses import dataclass, replace
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Optional
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from models import VehicleDynamicsModel
 from solvers import SpatialNLPSolver
 
 from .dataset import ReferenceLap
+from .practice import G_MAX, bound_curvature, practice_speed
 
 
 @dataclass(frozen=True)
@@ -58,11 +60,26 @@ def car_for(params: Mapping[str, float], air_density=None):
     return vehicle, tires
 
 
+def model_track(reference: ReferenceLap, g_max: Optional[float] = G_MAX):
+    """
+    The reference lap's path, with its curvature bounded by the speeds of the sessions before qualifying
+    (calibration/practice.py, TRK-11); g_max None leaves it as placed.
+    """
+    track = copy.deepcopy(reference.track)
+    if g_max:
+        bound_curvature(track, practice_speed(reference.round, track), g_max)
+    return track
+
+
 def model_lap(params: Mapping[str, float], reference: ReferenceLap):
-    """The model's optimal qualifying lap with these parameters, on the reference lap's path and weather."""
+    """
+    The model's optimal qualifying lap with these parameters, on the reference lap's (bounded) path and weather.
+    params may hold "g_max" for the curvature bound (default G_MAX; 0 or None for no bound).
+    """
     vehicle, tires = car_for(params, reference.air_density)
     ers = get_ers_config("2026", session="qualifying", event=reference.round)
-    solver = SpatialNLPSolver(VehicleDynamicsModel(vehicle, ers, tires), reference.track, ers)
+    track = model_track(reference, params.get("g_max", G_MAX))
+    solver = SpatialNLPSolver(VehicleDynamicsModel(vehicle, ers, tires), track, ers)
     solver.verbose = False
     with contextlib.redirect_stdout(io.StringIO()):
         return solver.solve()
