@@ -244,6 +244,10 @@ class F1TrackModel:
         self.load_from_geometry(geometry)
 
         event = find_event_2026(round_number) if self.year == 2026 else None
+        if raceline is None:
+            hint = f" (--use-tumftm places the current raceline, {event.raceline})" if event and event.raceline else (
+                " (no current raceline for this layout yet)" if event else "")
+            print(f"   ⚠ FastF1 map line, not the driven line: its curvature can be off by metres (TRK-10){hint}")
         if event is not None and event.straight_mode_zones:
             corners = corner_distances(session, geometry)
             if corners is None:

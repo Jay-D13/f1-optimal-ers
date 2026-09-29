@@ -335,6 +335,8 @@ track.load_from_tumftm_raceline('data/racelines/monza.csv')                    #
 track.load_from_fastf1(raceline='data/racelines/monza.csv')                   # placed on the FastF1 session
 ```
 
+**Which path to use for 2026:** `--use-tumftm` on the 8 rounds whose TUM layout is current (Shanghai, Suzuka, Montreal, Spielberg, Silverstone, Spa, Budapest, Monza; the `raceline` field in `config/events.py`). The other 7 (Melbourne, Barcelona, Miami, Monaco, Zandvoort, Madrid, Baku) have no current map of the driven line yet: only the FastF1 map line, whose curvature is unreliable.
+
 `--use-tumftm` places the raceline on the session: it is registered onto the FastF1 line (rotation and shift), takes that line's height, starts at its timing line, and gets the FIA Straight Mode zones. A raceline more than 15 m from the session's layout anywhere is refused: 2026 Melbourne and Barcelona have changed since the TUM data were made.
 
 - **Pros**: Smoother curvature, theoretically optimal racing line
