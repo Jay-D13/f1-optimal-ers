@@ -61,6 +61,24 @@ class ERSConfig:
     
     # Maximum e-motor torque
     torque_e_motor_max: float = 200.0       # [Nm]
+
+    # 2026 rules (defaults keep the 2025 behaviour)
+    # Deploy limit vs speed: "flat" (max_deployment_power), "standard" (race) or "overtake" (qualifying, C5.2.8)
+    deploy_curve: str = "flat"
+    # MGU-K and inverter efficiency, wheel <-> DC bus. The 2026 limits (deploy curve, ±350 kW, recharge cap)
+    # are DC powers and energies; 1.0 applies them to the mechanical power at the wheel.
+    mgu_k_efficiency: float = 1.0
+    # Max - min stored energy while on track (J, C5.2.9). None: fixed min_soc/max_soc bounds instead.
+    soc_window: Optional[float] = None
+    # Harvest allowed at full throttle (W, DC; "super-clip"). None: max_recovery_power.
+    superclip_power: Optional[float] = None
+    # Qualifying lap: start with a full store, include the run-up from the last corner, finish anywhere
+    qualifying: bool = False
+    # Ramp-down of the ERS-K power at full throttle (C5.12.4-7): a first step of at most ramp_first_step,
+    # then at most ramp_rate, while the ERS-K DC power is above ramp_release. None: no ramp rules.
+    ramp_rate: Optional[float] = None       # [W/s]
+    ramp_first_step: float = 150e3          # [W]
+    ramp_release: float = 100e3             # [W]
     
     @property
     def usable_soc_range(self) -> float:
@@ -92,16 +110,51 @@ _REG_OVERRIDES: Mapping[str, dict] = {
         "deployment_limit_per_lap": 100.0e6,  # Effectively Unlimited (use huge number)
         "etc_recovery_efficiency": 0.0,       # MGU-H Removed
         "regulation_year": 2026,
+        "deploy_curve": "standard",
+        # Starting values, calibrated in ROADMAP Phase 4: MGU-K + inverter 0.95, battery 0.97 each way
+        "mgu_k_efficiency": 0.95,
+        "deployment_efficiency": 0.95 * 0.97,
+        "recovery_efficiency": 0.95 * 0.97,
     },
 }
 
-def get_ers_config(regulation_set: str = "2025", base: ERSConfig | None = None) -> ERSConfig:
+def get_ers_config(
+    regulation_set: str = "2025",
+    base: ERSConfig | None = None,
+    session: str = "race",
+    event=None,
+) -> ERSConfig:
+    """
+    ERS rules for a regulation set. For 2026 qualifying (session="qualifying"): the Overtake deploy curve,
+    the 4 MJ window with a full store at the start, and the event's recharge cap and super-clip limit
+    (`event` is a 2026 round number or track name; unknown events keep the base 8.5 MJ and 350 kW).
+    Sessions don't change the 2025 rules.
+    """
     cfg = base or ERSConfig()
     
     if regulation_set not in _REG_OVERRIDES:
         raise ValueError(f"Unknown regulation set: {regulation_set}. Options: {list(_REG_OVERRIDES.keys())}")
+    if session not in ("race", "qualifying"):
+        raise ValueError(f"Unknown session: {session}. Options: race, qualifying")
 
-    return replace(cfg, **_REG_OVERRIDES[regulation_set])
+    cfg = replace(cfg, **_REG_OVERRIDES[regulation_set])
+    if regulation_set != "2026" or session != "qualifying":
+        return cfg
+
+    from config.events import find_event_2026
+
+    found = find_event_2026(event)
+    return replace(
+        cfg,
+        deploy_curve="overtake",
+        soc_window=4.0e6,
+        min_soc=0.0,
+        max_soc=1.0,
+        qualifying=True,
+        recovery_limit_per_lap=(found.quali_recharge_mj if found else 8.5) * 1e6,
+        superclip_power=(found.superclip_kw if found else 350.0) * 1e3,
+        ramp_rate=(found.ramp_rate_kw_s if found else 100.0) * 1e3,
+    )
 
 
 @dataclass

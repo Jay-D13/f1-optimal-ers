@@ -10,7 +10,8 @@ from solvers import MultiLapSpatialNLPSolver
 class _DummyTrackData:
     def __init__(self, n_points: int):
         self.gradient = np.zeros(n_points)
-        self.radius = np.ones(n_points) * 220.0
+        # Tight enough that grip, and so tyre temperature, limits the speed
+        self.radius = np.ones(n_points) * 60.0
 
 
 class _DummyTrack:
@@ -38,11 +39,11 @@ class MultiLapDynamicTireTests(unittest.TestCase):
 
     def test_scalar_mode_is_stable_and_dynamic_mode_adds_tire_states(self):
         solver = self._make_solver()
-        v_limit = np.array([55.0, 60.0, 58.0, 62.0, 57.0], dtype=float)
+        v_limit = np.array([30.0, 31.0, 30.5, 31.5, 30.0], dtype=float)
 
         try:
             scalar_1 = solver.solve(
-                v_limit_profile=v_limit,
+                v_guess=v_limit,
                 n_laps=2,
                 initial_soc=0.6,
                 final_soc_min=0.25,
@@ -51,7 +52,7 @@ class MultiLapDynamicTireTests(unittest.TestCase):
                 tire_model="scalar",
             )
             scalar_2 = solver.solve(
-                v_limit_profile=v_limit,
+                v_guess=v_limit,
                 n_laps=2,
                 initial_soc=0.6,
                 final_soc_min=0.25,
@@ -60,7 +61,7 @@ class MultiLapDynamicTireTests(unittest.TestCase):
                 tire_model="scalar",
             )
             dynamic = solver.solve(
-                v_limit_profile=v_limit,
+                v_guess=v_limit,
                 n_laps=2,
                 initial_soc=0.6,
                 final_soc_min=0.25,

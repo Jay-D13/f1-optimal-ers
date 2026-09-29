@@ -481,7 +481,6 @@ def generate_individual_plots():
         
         nlp_solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
         trajectory = nlp_solver.solve(
-            v_limit_profile=velocity_profile.v,
             initial_soc=0.5,
             final_soc_min=0.3,
             is_flying_lap=True
@@ -552,7 +551,6 @@ def generate_individual_plots():
         
         nlp_solver = SpatialNLPSolver(vehicle_model, track, ers_config, ds=5.0)
         trajectory = nlp_solver.solve(
-            v_limit_profile=velocity_profile.v,
             initial_soc=initial_soc,
             final_soc_min=final_soc,
             is_flying_lap=True
@@ -607,7 +605,6 @@ def generate_individual_plots():
     
     nlp_solver_2026 = SpatialNLPSolver(vehicle_model_2026, track, ers_config_2026, ds=5.0)
     trajectory_2026 = nlp_solver_2026.solve(
-        v_limit_profile=velocity_profile.v,
         initial_soc=0.5,
         final_soc_min=0.3,
         is_flying_lap=True

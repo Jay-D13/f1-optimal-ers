@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,8 @@ from solvers import (
     ForwardBackwardSolver,
     SpatialNLPSolver,
     MultiLapSpatialNLPSolver,
+    SolverError,
+    VelocityProfile,
 )
 from models import F1TrackModel, VehicleDynamicsModel, find_tumftm_raceline
 from config import (
@@ -88,6 +91,53 @@ def _format_dynamic_tire_summary(trajectory) -> str:
     return "\n".join(lines)
 
 
+def _format_run_up(trajectory) -> str:
+    """Format the qualifying run-up (last corner to the timing line) for the text summary."""
+    run_up = getattr(trajectory, "run_up", None)
+    if not run_up:
+        return ""
+    return (
+        "        QUALIFYING RUN-UP (last apex to the line, not timed):\n"
+        f"        Distance:               {run_up['distance']:.0f} m\n"
+        f"        Speed:                  {run_up['v_start']*3.6:.0f} -> {run_up['v_line']*3.6:.0f} km/h\n"
+        f"        SOC:                    {run_up['soc_start']*100:.1f}% -> {run_up['soc_line']*100:.1f}%\n"
+        f"        Deployed / Recovered:   {run_up['energy_deployed']/1e6:.2f} / {run_up['energy_recovered']/1e6:.2f} MJ (DC)\n"
+    )
+
+
+def reference_lap(vehicle_config, ers_config, track, args, v_guess, unlimited: bool) -> VelocityProfile:
+    """
+    An optimal single lap to compare the ERS strategy with, from the same NLP: the MGU-K switched off, or
+    (unlimited) at its power limits with no energy limits. Falls back to the forward-backward profile if
+    the solve fails.
+    """
+    if unlimited:
+        ers = replace(ers_config, deployment_limit_per_lap=1e12, recovery_limit_per_lap=1e12, min_soc=-1e6,
+                      soc_window=None)
+        final_soc_min = -1e6
+    else:
+        ers = replace(ers_config, max_deployment_power=0.0, max_recovery_power=0.0)
+        final_soc_min = min(args.final_soc_min, args.initial_soc)
+    model = VehicleDynamicsModel(vehicle_config, ers)
+    solver = SpatialNLPSolver(
+        model, track, ers, ds=args.ds, collocation_method=args.collocation, nlp_solver=args.nlp_solver,
+        ipopt_linear_solver=args.ipopt_linear_solver, ipopt_hessian_approximation=args.ipopt_hessian,
+    )
+    solver.verbose = False
+    try:
+        traj = solver.solve(v_guess=v_guess, initial_soc=args.initial_soc, final_soc_min=final_soc_min,
+                            is_flying_lap=args.flying_lap)
+    except SolverError as e:
+        print(f"   ⚠ Reference lap failed ({e}); using the forward-backward profile instead")
+        return ForwardBackwardSolver(model, track, use_ers_power=unlimited).solve(flying_lap=args.flying_lap)
+
+    # The NLP nodes line up with the track points (see SpatialNLPSolver.__init__)
+    n = len(track.track_data.s)
+    v = traj.v_opt[:n]
+    a_x = np.append((v[1:] ** 2 - v[:-1] ** 2) / (2.0 * solver.ds), 0.0)
+    return VelocityProfile(s=track.track_data.s, v=v, a_x=a_x, t=traj.t_opt[:n], lap_time=traj.lap_time)
+
+
 def main(args):
     """Main execution function."""
     
@@ -115,14 +165,17 @@ def main(args):
     print("CONFIGURATION")
     print("="*70)
     
-    ers_config = get_ers_config(args.regulations)
+    ers_config = get_ers_config(args.regulations, session=args.session, event=args.event or args.track)
     
     # Vehicle config (track-specific)
     vehicle_config = get_vehicle_config(args.regulations, base=get_track_config(args.track))
     
     print(f"\nTrack: {args.track}")
-    print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
-          f"{ers_config.battery_usable_energy/1e6:.1f}MJ/lap limit")
+    print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy ({ers_config.deploy_curve} curve), "
+          f"{ers_config.recovery_limit_per_lap/1e6:.1f} MJ recharge per lap")
+    if ers_config.qualifying:
+        print(f"Qualifying: store full at the last corner, {ers_config.soc_window/1e6:.0f} MJ window, "
+              f"super-clip up to {ers_config.superclip_power/1e3:.0f} kW; --initial-soc and --final-soc-min are ignored")
     print(f"Vehicle: Cd={vehicle_config.cd:.2f}, Cl={vehicle_config.cl:.2f}")
     print(f"Collocation: {args.collocation}")
     print(f"Spatial step ds: {args.ds} m")
@@ -165,12 +218,18 @@ def main(args):
     track = F1TrackModel(year=args.year, gp=args.track, ds=args.ds)
     driver = args.driver #if args.driver else 'VER' # DU DU DU DUUU MAX VERSTAPPEN
     
-    # Try TUMFTM raceline first, fallback to FastF1
+    # With --use-tumftm, the TUMFTM raceline placed on the FastF1 session (height, timing line, Straight Mode
+    # zones), or on its own if the session can't be loaded or its layout has changed; otherwise the FastF1 line
     tumftm_path = find_tumftm_raceline(args.track)
     
     if tumftm_path is not None and args.use_tumftm:
         print(f"   Loading TUMFTM raceline: {tumftm_path}")
-        track.load_from_tumftm_raceline(str(tumftm_path))
+        try:
+            _, driver = track.load_from_fastf1(driver=args.driver, raceline=str(tumftm_path))
+        except Exception as e:
+            print(f"   ⚠ Raceline not placed on the FastF1 session ({e}); flat raceline without zones")
+            track = F1TrackModel(year=args.year, gp=args.track, ds=args.ds)
+            track.load_from_tumftm_raceline(str(tumftm_path))
     else:
         print(f"   Loading from FastF1 ({args.year} {args.track})...")
         try:
@@ -182,8 +241,9 @@ def main(args):
     
     print(f"   Track loaded: {track.total_length:.0f}m, {len(track.segments)} segments")
     print(f"   Driver for telemetry: {driver}")
-    
-    v_max = track.compute_speed_limits(vehicle_config)
+    if track.air_density is not None:
+        vehicle_config = replace(vehicle_config, rho_air=track.air_density)
+        print(f"   Air density from session weather: {track.air_density:.3f} kg/m³")
 
     # =========================================================================
     print("\n" + "="*70)
@@ -199,20 +259,19 @@ def main(args):
     print("PHASE 1 - VELOCITY PROFILE (Forward-Backward)")
     print("="*70)
     
-    print(f"\n   Computing theoretical profile WITHOUT ERS (Flying: {args.flying_lap})...")
-    fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
-    velocity_profile_no_ers = fb_solver.solve(flying_lap=args.flying_lap)
+    print(f"\n   Initial guess: forward-backward profile without ERS (Flying: {args.flying_lap})...")
+    fb_profile = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False).solve(flying_lap=args.flying_lap)
 
-    print(f"\n   Computing theoretical profile WITH ERS (Flying: {args.flying_lap})...")
-    fb_solver.use_ers_power = True
-    velocity_profile_with_ers = fb_solver.solve(flying_lap=args.flying_lap)
-    
+    print("\n   Reference laps from the same NLP: MGU-K off, and no energy limits...")
+    velocity_profile_no_ers = reference_lap(vehicle_config, ers_config, track, args, fb_profile.v, unlimited=False)
+    velocity_profile_with_ers = reference_lap(vehicle_config, ers_config, track, args, fb_profile.v, unlimited=True)
+
     print(f"\n   Results:")
-    print(f"     No ERS:   {velocity_profile_no_ers.lap_time:.3f}s "
+    print(f"     No ERS:          {velocity_profile_no_ers.lap_time:.3f}s "
           f"(v: {velocity_profile_no_ers.v.min()*3.6:.0f}-{velocity_profile_no_ers.v.max()*3.6:.0f} km/h)")
-    print(f"     With ERS: {velocity_profile_with_ers.lap_time:.3f}s "
+    print(f"     Unlimited energy: {velocity_profile_with_ers.lap_time:.3f}s "
           f"(v: {velocity_profile_with_ers.v.min()*3.6:.0f}-{velocity_profile_with_ers.v.max()*3.6:.0f} km/h)")
-    print(f"     Theoretical improvement: {velocity_profile_no_ers.lap_time - velocity_profile_with_ers.lap_time:.3f}s")
+    print(f"     Forward-backward (initial guess): {fb_profile.lap_time:.3f}s")
 
     lap_grip_scales = None
     if active_tire_model == "scalar" and args.enable_tire_degradation:
@@ -246,7 +305,7 @@ def main(args):
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
         optimal_trajectory = nlp_solver.solve(
-            v_limit_profile=velocity_profile_with_ers.v,
+            v_guess=fb_profile.v,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
             is_flying_lap=args.flying_lap,
@@ -263,7 +322,7 @@ def main(args):
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
         optimal_trajectory = nlp_solver.solve(
-            v_limit_profile=velocity_profile_with_ers.v,
+            v_guess=fb_profile.v,
             n_laps=args.laps,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
@@ -311,18 +370,19 @@ def main(args):
 
         LAP TIME PERFORMANCE:
         Total Time (No ERS):    {total_time_no_ers:.3f} s
-        Total Time (With ERS):  {total_time_with_ers:.3f} s
+        Total Time (No Energy Limits): {total_time_with_ers:.3f} s
         Total Time (Optimal):   {total_time_optimal:.3f} s
         Avg Lap (Optimal):      {total_time_optimal / n_laps:.3f} s
         
         Improvement vs No ERS:  {improvement:.3f} s ({improvement_pct:.2f}%)
-        Gap to Theoretical:     {gap_to_theoretical:.3f} s
+        Cost of Energy Limits:  {gap_to_theoretical:.3f} s
 
         SOLVER INFORMATION:
         Status:                 {optimal_trajectory.solver_status}
         Solve Time:             {optimal_trajectory.solve_time:.2f} s
         Solver Type:            {optimal_trajectory.solver_name}
 
+{_format_run_up(optimal_trajectory)}
         ENERGY MANAGEMENT:
         Initial SOC:            {energy_stats['initial_soc']*100:.1f}%
         Final SOC:              {energy_stats['final_soc']*100:.1f}%
@@ -332,8 +392,8 @@ def main(args):
         Recovery Efficiency:    {(energy_stats['total_recovered_MJ'] / max(energy_stats['total_deployed_MJ'], 1e-6) * 100):.1f}%
 
         VELOCITY STATISTICS:
-        No ERS Profile:         {velocity_profile_no_ers.v.min()*3.6:.0f} - {velocity_profile_no_ers.v.max()*3.6:.0f} km/h
-        With ERS Profile:       {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
+        No ERS Lap:             {velocity_profile_no_ers.v.min()*3.6:.0f} - {velocity_profile_no_ers.v.max()*3.6:.0f} km/h
+        No Energy Limits Lap:   {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
         Optimal Strategy:       {optimal_trajectory.v_opt.min()*3.6:.0f} - {optimal_trajectory.v_opt.max()*3.6:.0f} km/h (avg: {optimal_trajectory.v_opt.mean()*3.6:.0f} km/h)
 
 {lap_breakdown if lap_breakdown else ""}
@@ -363,6 +423,9 @@ def main(args):
     
     # Save numpy arrays for detailed analysis
     run_manager.save_numpy(optimal_trajectory.s, 'distance')
+    run_manager.save_numpy(optimal_trajectory.t_opt, 'time')
+    run_manager.save_numpy(track.track_data.x, 'x')
+    run_manager.save_numpy(track.track_data.y, 'y')
     run_manager.save_numpy(optimal_trajectory.v_opt, 'velocity_optimal')
     run_manager.save_numpy(velocity_profile_no_ers.v, 'velocity_no_ers')
     run_manager.save_numpy(velocity_profile_with_ers.v, 'velocity_with_ers')

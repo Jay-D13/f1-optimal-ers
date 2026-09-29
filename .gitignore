@@ -20,3 +20,6 @@ results/
 .claude/worktrees/
 
 .uv-cache/
+
+# Frontend
+node_modules/
