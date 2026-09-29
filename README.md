@@ -244,6 +244,8 @@ python main.py [OPTIONS]
 | `--track-temp-c` | float | `35.0` | Dynamic tire model: track temperature (°C) |
 | `--tire-init-temp-c` | float | `80.0` | Dynamic tire model: tire temperature at the start (°C) |
 | `--collocation` | str | `trapezoidal` | Integration method: `trapezoidal`, `hermite_simpson`, `euler` |
+| `--session` | str | `qualifying` | 2026 energy rules: `qualifying` (Overtake curve, per-event recharge cap, 4 MJ window starting full, run-up from the last corner, ramp-down rules) or `race` |
+| `--event` | str | from `--track` | 2026 round number or name for the event's energy limits |
 | `--nlp-solver` | str | `auto` | NLP backend: `auto` (= `ipopt`), `ipopt`, `fatrop`, or `sqpmethod` |
 | `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |
 | `--ipopt-hessian` | str | `exact` | Ipopt Hessian mode: `exact`, or `limited-memory` (faster per iteration, but can stop seconds away from the optimum) |
