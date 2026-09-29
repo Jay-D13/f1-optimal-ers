@@ -32,6 +32,7 @@ class VehicleConfig:
     # 2026 active aero until the FIA zones are modelled (ROADMAP Phase 2): Straight Mode on any stretch
     # with a radius above straight_mode_min_radius, scaling the drag and downforce areas
     straight_mode_min_radius: float = 400.0   # [m]
+    straight_mode_transition: float = 0.4     # [s] Longest opening or closing time (C3.10.10o)
     straight_mode_drag_factor: float = 0.65   # [-]
     straight_mode_downforce_factor: float = 1.0  # [-]
     
@@ -136,25 +137,40 @@ _REGULATION_OVERRIDES: Mapping[str, Dict[str, float]] = {
     },
     # 2026 new regulations
     "2026": {
-        "mass": 768.0,          # [kg] 30kg lighter
+        "mass": 772.0,          # [kg] 726 kg qualifying minimum + ~46 kg of tyres (C4.1; tyre mass unverified)
         "pow_max_ice": 400e3,   # [W] ~536 HP (reduced ICE)
         "pow_max_ers": 350e3,   # [W] MGU-K power (350 kW - tripled!)
         "regulation_year": 2026,
+        # Starting values for the Phase 4 fit. Corner Mode aero from 2026 telemetry fits (REFERENCE_2026.md §2, §7),
+        # the same at every track: scaling the 2025 presets (TUM estimates) by the FIA's published targets
+        # made the 2026 car far too fast on the straights, since the 2025 car itself isn't calibrated.
+        "c_w_a": 0.95,          # [m²] Corner Mode CdA
+        "c_z_a_f": 3.45 * 0.451,  # [m²] Corner Mode ClA 3.45, 45 % front
+        "c_z_a_r": 3.45 * 0.549,
+        # Straight Mode vs Corner Mode, from CFD estimates: about -20 % drag, -28 % downforce
+        "straight_mode_drag_factor": 0.80,
+        "straight_mode_downforce_factor": 0.72,
     },
 }
+
+# Scaling of the base car's aero per regulation set (applied to any track preset). None for now:
+# the 2026 car takes absolute values from 2026 data instead (see _REGULATION_OVERRIDES).
+_REGULATION_SCALES: Mapping[str, Dict[str, float]] = {}
 
 def get_vehicle_config(regulation_set: str = "2025", *, base: Optional["VehicleConfig"] = None) -> "VehicleConfig":
     """Return a VehicleConfig for a given regulation set.
 
     This avoids duplicating all the shared parameters: we create a base VehicleConfig
     (defaults to VehicleConfig()) and then override only the fields that change.
+    The 2026 aero areas are scaled from the base (e.g. a track preset) rather than replaced.
     """
     cfg = base or VehicleConfig()
     try:
         overrides = _REGULATION_OVERRIDES[regulation_set]
     except KeyError as e:
         raise ValueError(f"Unknown regulation set: {regulation_set}") from e
-    return replace(cfg, **overrides)
+    scaled = {name: getattr(cfg, name) * factor for name, factor in _REGULATION_SCALES.get(regulation_set, {}).items()}
+    return replace(cfg, **overrides, **scaled)
 
 
 # used for grip

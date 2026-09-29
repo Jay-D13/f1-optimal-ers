@@ -59,6 +59,59 @@ class DeployPowerLimitTests(unittest.TestCase):
                 self.assertAlmostEqual(float(deploy_power_limit(v_kph / 3.6, ers)), p_kw * 1e3, delta=1e-3)
 
 
+class QualifyingRulesTests(unittest.TestCase):
+    """2026 qualifying: Overtake curve, per-event caps on the DC side, 4 MJ window, run-up from the last apex."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ers = get_ers_config("2026", session="qualifying", event="Monza")
+        vehicle_model = VehicleDynamicsModel(get_vehicle_config("2026", base=get_track_config("Monza")), cls.ers)
+        track = F1TrackModel(year=2024, gp="Monza", ds=5.0)
+        track.load_from_tumftm_raceline(str(find_tumftm_raceline("Monza", RACELINES)))
+        cls.solver = SpatialNLPSolver(vehicle_model, track, cls.ers, ds=5.0)
+        cls.solver.verbose = False
+        cls.trajectory = cls.solver.solve()
+
+    def test_overtake_curve(self):
+        expected_kw = {200: 350, 337.5: 350, 340: 300, 350: 100, 355: 0, 360: 0}
+        for v_kph, p_kw in expected_kw.items():
+            with self.subTest(v_kph=v_kph):
+                self.assertAlmostEqual(float(deploy_power_limit(v_kph / 3.6, self.ers)), p_kw * 1e3, delta=1e-3)
+
+    def test_event_rules(self):
+        self.assertEqual(self.ers.recovery_limit_per_lap, 5.0e6)                                   # Monza
+        self.assertEqual(get_ers_config("2026", session="qualifying", event=3).superclip_power, 250e3)   # Suzuka, before Miami
+        self.assertEqual(get_ers_config("2026", session="qualifying", event="Miami").superclip_power, 350e3)
+        self.assertEqual(get_ers_config("2025", session="qualifying").deploy_curve, "flat")        # 2025 unchanged
+
+    def test_lap_uses_the_cap_and_the_window(self):
+        trajectory = self.trajectory
+        self.assertEqual(trajectory.solver_status, "optimal")
+        # The recharge cap binds, counted on the DC side from the timing line
+        self.assertAlmostEqual(trajectory.energy_recovered, self.ers.recovery_limit_per_lap, delta=1e3)
+        # The run-up starts full; the lap ends at the bottom of the 4 MJ window
+        self.assertIsNotNone(trajectory.run_up)
+        self.assertAlmostEqual(trajectory.run_up["soc_start"], 1.0, places=9)
+        floor = 1.0 - self.ers.soc_window / self.ers.battery_capacity
+        self.assertAlmostEqual(trajectory.soc_opt[-1], floor, delta=1e-6)
+        self.assertGreaterEqual(trajectory.soc_opt.min(), floor - 1e-6)
+
+    def test_dc_energy_bookkeeping(self):
+        # The stored energy changes by the DC flows, through the MGU-K and battery efficiencies
+        ers, t = self.ers, self.trajectory
+        stored = ers.battery_capacity * (t.soc_opt[0] - t.soc_opt[-1])
+        eta_k = ers.mgu_k_efficiency
+        moved = (t.energy_deployed * eta_k / ers.deployment_efficiency
+                 - t.energy_recovered / eta_k * ers.recovery_efficiency)
+        self.assertAlmostEqual(stored, moved, delta=1e3)  # J
+
+    def test_deploy_follows_the_curve(self):
+        nodes = self.trajectory.node_controls
+        limit = np.array([float(deploy_power_limit(v, self.ers)) for v in self.trajectory.v_opt])
+        # Mechanical deploy ≤ MGU-K efficiency × DC limit (plus the NLP's 2 kW corner smoothing)
+        self.assertTrue(np.all(nodes["P_deploy"] <= self.ers.mgu_k_efficiency * limit + 2e3))
+
+
 class SpatialNLPTests(unittest.TestCase):
     """Monza, 2025 rules."""
 

@@ -42,20 +42,44 @@ def _abs(x):
     return ca.fabs(x) if _is_casadi(x) else np.abs(x)
 
 
-def deploy_power_limit(v, ers: ERSConfig):
-    """
-    Maximum MGU-K deployment power (W) at speed v (m/s). Works on floats and CasADi expressions.
+def _sqrt(x):
+    return ca.sqrt(x) if _is_casadi(x) else np.sqrt(x)
 
-    2026: 350 kW up to 290 km/h, then 1800 - 5v kW, then 6900 - 20v kW from 340 km/h,
-    reaching 0 at 345 km/h (v in km/h). Earlier years: a flat limit.
+
+def _min(a, b, smooth: float):
+    """min(a, b), or with smooth > 0 a smooth version that stays within smooth/2 of it."""
+    if smooth <= 0.0:
+        return ca.fmin(a, b)
+    return 0.5 * (a + b - _sqrt((a - b) ** 2 + smooth**2))
+
+
+def _max(a, b, smooth: float):
+    return -_min(-a, -b, smooth)
+
+
+def deploy_power_limit(v, ers: ERSConfig, smooth: float = 0.0):
     """
-    if ers.regulation_year < 2026:
+    Maximum MGU-K deployment power (W, DC side from 2026) at speed v (m/s). Works on floats and CasADi expressions.
+
+    ers.deploy_curve (C5.2.8; v in km/h, P in kW):
+    - "standard" (2026 race): 350 up to 290 km/h, then 1800 - 5v, from 340 km/h 6900 - 20v, 0 from 345 km/h;
+    - "overtake" (2026 qualifying): 350 up to 337.5 km/h, then 7100 - 20v, 0 from 355 km/h;
+    - "flat" (before 2026): max_deployment_power.
+    smooth > 0 rounds the corners over about that many watts (for the NLP); 0 is the exact rule.
+    """
+    if ers.deploy_curve == "flat":
         return ers.max_deployment_power
 
     v_kph = v * 3.6
-    p_taper1 = (1800.0 - 5.0 * v_kph) * 1000.0    # Linear drop 290-340 km/h
-    p_taper2 = (6900.0 - 20.0 * v_kph) * 1000.0   # Sharp drop 340-345 km/h
-    return ca.fmax(0, ca.fmin(ers.max_deployment_power, ca.fmin(p_taper1, p_taper2)))
+    if ers.deploy_curve == "overtake":
+        tapers = [(7100.0 - 20.0 * v_kph) * 1000.0]
+    else:
+        tapers = [(1800.0 - 5.0 * v_kph) * 1000.0,   # Linear drop 290-340 km/h
+                  (6900.0 - 20.0 * v_kph) * 1000.0]  # Sharp drop 340-345 km/h
+    limit = ers.max_deployment_power
+    for taper in tapers:
+        limit = _min(limit, taper, smooth)
+    return _max(0.0, limit, smooth)
 
 
 def air_density(temp_c: float, pressure_hpa: float, humidity_pct: float = 50.0) -> float:

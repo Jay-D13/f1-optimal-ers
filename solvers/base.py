@@ -56,6 +56,7 @@ class OptimalTrajectory:
     grip_usage_front: Optional[np.ndarray] = None  # Front friction-ellipse usage (≤ 1 within grip)
     grip_usage_rear: Optional[np.ndarray] = None   # Rear friction-ellipse usage
     node_controls: Optional[Dict] = None           # NLP controls at the nodes (and Hermite-Simpson midpoints)
+    run_up: Optional[Dict] = None                  # Qualifying run-up from the last apex to the line
 
     def get_reference_at_distance(self, distance: float) -> Dict:
         """reference values at given distance (with lap wrapping)."""

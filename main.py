@@ -91,6 +91,20 @@ def _format_dynamic_tire_summary(trajectory) -> str:
     return "\n".join(lines)
 
 
+def _format_run_up(trajectory) -> str:
+    """Format the qualifying run-up (last corner to the timing line) for the text summary."""
+    run_up = getattr(trajectory, "run_up", None)
+    if not run_up:
+        return ""
+    return (
+        "        QUALIFYING RUN-UP (last apex to the line, not timed):\n"
+        f"        Distance:               {run_up['distance']:.0f} m\n"
+        f"        Speed:                  {run_up['v_start']*3.6:.0f} -> {run_up['v_line']*3.6:.0f} km/h\n"
+        f"        SOC:                    {run_up['soc_start']*100:.1f}% -> {run_up['soc_line']*100:.1f}%\n"
+        f"        Deployed / Recovered:   {run_up['energy_deployed']/1e6:.2f} / {run_up['energy_recovered']/1e6:.2f} MJ (DC)\n"
+    )
+
+
 def reference_lap(vehicle_config, ers_config, track, args, v_guess, unlimited: bool) -> VelocityProfile:
     """
     An optimal single lap to compare the ERS strategy with, from the same NLP: the MGU-K switched off, or
@@ -98,7 +112,8 @@ def reference_lap(vehicle_config, ers_config, track, args, v_guess, unlimited: b
     the solve fails.
     """
     if unlimited:
-        ers = replace(ers_config, deployment_limit_per_lap=1e12, recovery_limit_per_lap=1e12, min_soc=-1e6, max_soc=1e6)
+        ers = replace(ers_config, deployment_limit_per_lap=1e12, recovery_limit_per_lap=1e12, min_soc=-1e6,
+                      soc_window=None)
         final_soc_min = -1e6
     else:
         ers = replace(ers_config, max_deployment_power=0.0, max_recovery_power=0.0)
@@ -150,14 +165,17 @@ def main(args):
     print("CONFIGURATION")
     print("="*70)
     
-    ers_config = get_ers_config(args.regulations)
+    ers_config = get_ers_config(args.regulations, session=args.session, event=args.event or args.track)
     
     # Vehicle config (track-specific)
     vehicle_config = get_vehicle_config(args.regulations, base=get_track_config(args.track))
     
     print(f"\nTrack: {args.track}")
-    print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy, "
-          f"{ers_config.battery_usable_energy/1e6:.1f}MJ/lap limit")
+    print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy ({ers_config.deploy_curve} curve), "
+          f"{ers_config.recovery_limit_per_lap/1e6:.1f} MJ recharge per lap")
+    if ers_config.qualifying:
+        print(f"Qualifying: store full at the last corner, {ers_config.soc_window/1e6:.0f} MJ window, "
+              f"super-clip up to {ers_config.superclip_power/1e3:.0f} kW; --initial-soc and --final-soc-min are ignored")
     print(f"Vehicle: Cd={vehicle_config.cd:.2f}, Cl={vehicle_config.cl:.2f}")
     print(f"Collocation: {args.collocation}")
     print(f"Spatial step ds: {args.ds} m")
@@ -358,6 +376,7 @@ def main(args):
         Solve Time:             {optimal_trajectory.solve_time:.2f} s
         Solver Type:            {optimal_trajectory.solver_name}
 
+{_format_run_up(optimal_trajectory)}
         ENERGY MANAGEMENT:
         Initial SOC:            {energy_stats['initial_soc']*100:.1f}%
         Final SOC:              {energy_stats['final_soc']*100:.1f}%

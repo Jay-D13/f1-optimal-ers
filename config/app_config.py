@@ -37,6 +37,8 @@ class AppConfig:
     ipopt_linear_solver: str = "mumps"
     ipopt_hessian: Literal["limited-memory", "exact"] = "exact"
     regulations: Literal["2025", "2026"] = "2025"
+    session: Literal["qualifying", "race"] = "qualifying"
+    event: str | None = None
 
 
 def _load_yaml_defaults(path: Path) -> dict:
@@ -68,6 +70,8 @@ def cli(
     laps: Annotated[int, typer.Option(help="Number of laps in the NLP horizon")] = 1,
     flying_lap: Annotated[bool, typer.Option("--flying-lap/--no-flying-lap", help="Continuous lap (no standing start)")] = True,
     regulations: Annotated[str, typer.Option(help="Regulation set: 2025 or 2026")] = "2025",
+    session: Annotated[str, typer.Option(help="2026 energy rules: qualifying (Overtake curve, start full, run-up from the last corner) or race")] = "qualifying",
+    event: Annotated[Optional[str], typer.Option(help="2026 round number or name for the event's energy limits (default: from --track)")] = None,
 
     # ── Tire degradation ──────────────────────────────────────────
     enable_tire_degradation: Annotated[bool, typer.Option("--enable-tire-degradation/--no-tire-degradation", help="Enable grip loss over laps")] = False,
@@ -101,7 +105,7 @@ def cli(
         "track": track, "year": year, "driver": driver, "use_tumftm": use_tumftm,
         "initial_soc": initial_soc, "final_soc_min": final_soc_min,
         "per_lap_final_soc_min": per_lap_final_soc_min, "ds": ds, "laps": laps,
-        "flying_lap": flying_lap, "regulations": regulations,
+        "flying_lap": flying_lap, "regulations": regulations, "session": session, "event": event,
         "enable_tire_degradation": enable_tire_degradation,
         "tire_wear_rate_per_lap": tire_wear_rate_per_lap,
         "tire_min_grip_scale": tire_min_grip_scale, "tire_model": tire_model,

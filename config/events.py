@@ -1,0 +1,55 @@
+"""
+2026 events and their energy rules, from the FIA's per-event "Power Unit Information" documents.
+
+Qualifying recharge caps are measured on the MGU-K's DC bus, timing line to timing line (C5.2.10).
+Super-clip: the harvest allowed at full throttle was 250 kW until Miami and 350 kW from Miami on (C5.12).
+The ramp rate applies after the first power step of a derate (C5.12.6).
+"""
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class Event2026:
+    round: int
+    name: str
+    tracks: tuple                    # Track names that map to this event (lower case)
+    quali_recharge_mj: float         # Qualifying recharge cap (MJ per lap, DC side)
+    race_recharge_mj: float          # Race recharge cap without Overtake (MJ per lap)
+    power_limited_distance_m: float  # FIA power-limited distance (m)
+    ramp_rate_kw_s: float            # Ramp-down rate after the first step (kW/s)
+    superclip_kw: float              # Harvest allowed at full throttle (kW)
+    verified: bool = True            # False when the cap is not from a public FIA document
+
+
+EVENTS_2026 = {
+    1: Event2026(1, "Australia", ("melbourne", "albert park"), 7.0, 8.0, 3518, 50, 250),
+    2: Event2026(2, "China", ("shanghai",), 9.0, 8.5, 3125, 100, 250),
+    3: Event2026(3, "Japan", ("suzuka",), 8.0, 8.5, 3472, 100, 250),
+    4: Event2026(4, "Miami", ("miami",), 8.0, 8.5, 3346, 100, 350),
+    5: Event2026(5, "Canada", ("montreal", "canada"), 6.0, 8.0, 2682, 100, 350),
+    6: Event2026(6, "Monaco", ("monaco",), 9.0, 8.5, 1388, 100, 350),
+    7: Event2026(7, "Barcelona", ("catalunya", "barcelona"), 7.0, 8.5, 2440, 100, 350),
+    8: Event2026(8, "Austria", ("spielberg", "austria"), 6.0, 8.0, 2923, 100, 350),
+    9: Event2026(9, "Great Britain", ("silverstone",), 6.5, 8.0, 3833, 50, 350),
+    10: Event2026(10, "Belgium", ("spa",), 7.0, 8.5, 4594, 50, 350),
+    11: Event2026(11, "Hungary", ("budapest", "hungaroring"), 9.0, 8.5, 1885, 100, 350),
+    # The Dutch PUI is not public: 7.5 MJ from ScuderiaFans, 9 MJ per SomersF1 (REFERENCE_2026 §4)
+    12: Event2026(12, "Netherlands", ("zandvoort",), 7.5, 8.5, 2411, 100, 350, verified=False),
+    13: Event2026(13, "Italy", ("monza",), 5.0, 7.0, 4218, 50, 350),
+    14: Event2026(14, "Spain (Madrid)", ("madrid", "madring"), 7.5, 8.5, 3206, 100, 350),
+    15: Event2026(15, "Azerbaijan", ("baku",), 8.5, 8.5, 3796, 50, 350),
+}
+
+
+def find_event_2026(key) -> Optional[Event2026]:
+    """The 2026 event for a round number or a track name, or None."""
+    if key is None:
+        return None
+    if isinstance(key, int) or str(key).isdigit():
+        return EVENTS_2026.get(int(key))
+    name = str(key).lower()
+    for event in EVENTS_2026.values():
+        if name in event.tracks or name == event.name.lower():
+            return event
+    return None
