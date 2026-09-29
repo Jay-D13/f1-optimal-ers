@@ -60,6 +60,10 @@ class VehicleConfig:
     # not calibrated: FastF1's ~4 Hz car data is too coarse to measure them (Phase 4)
     throttle_rise_time: Optional[float] = 0.15  # [s]
     brake_rise_time: Optional[float] = 0.15     # [s] Full travel = max_brake_force
+    # Cost of pressing throttle and brake together, in seconds per metre at full throttle and full brake;
+    # None = free. Real 2026 pole laps have almost no overlap, while without it the NLP drives the engine against
+    # the brakes to harvest (REG-9)
+    pedal_overlap_cost: Optional[float] = 0.1   # [s/m]
 
     # ==================== Physical Constants ====================
     g: float = 9.81               # [m/s²] Gravitational acceleration

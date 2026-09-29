@@ -485,7 +485,14 @@ class SpatialNLPSolver(BaseSolver):
         # A tiny cost on friction braking, so that where only the net rear force matters the solver lifts
         # instead of braking against the throttle. Braking 1 m at full force costs BRAKE_COST seconds.
         braking = sum(ca.sum1(u["BRAKE_F"] + u["BRAKE_R"]) for u in (U, U_MID) if u)
-        opti.minimize(T_total + self.BRAKE_COST * self.ds * braking)
+        objective = T_total + self.BRAKE_COST * self.ds * braking
+        # Pedal overlap: a cost on throttle × brake, which keeps the solver from driving the engine against the
+        # brakes to harvest (REG-9). A hard limit gives almost the same laps but solves 4× slower.
+        overlap_cost = self.vehicle.vehicle.pedal_overlap_cost
+        if overlap_cost:
+            overlap = sum(ca.sum1(u["THROTTLE"] * (u["BRAKE_F"] + u["BRAKE_R"])) for u in (U, U_MID) if u)
+            objective = objective + overlap_cost * self.ds * overlap
+        opti.minimize(objective)
 
         # =================================================================
         # CONSTRAINTS
