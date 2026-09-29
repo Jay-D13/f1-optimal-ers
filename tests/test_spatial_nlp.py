@@ -84,6 +84,13 @@ class QualifyingRulesTests(unittest.TestCase):
         self.assertEqual(get_ers_config("2026", session="qualifying", event="Miami").superclip_power, 350e3)
         self.assertEqual(get_ers_config("2025", session="qualifying").deploy_curve, "flat")        # 2025 unchanged
 
+    def test_practice_rules(self):
+        practice = get_ers_config("2026", session="practice", event="Monza")
+        self.assertEqual(practice.recovery_limit_per_lap, 7.5e6)                                   # Against 5.0 in qualifying
+        self.assertEqual(practice.deploy_curve, "overtake")
+        self.assertEqual(practice.soc_window, 4.0e6)
+        self.assertTrue(practice.qualifying)                                                        # A push lap: start full, run-up
+
     def test_lap_uses_the_cap_and_the_window(self):
         trajectory = self.trajectory
         self.assertEqual(trajectory.solver_status, "optimal")

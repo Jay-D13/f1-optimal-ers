@@ -1,5 +1,5 @@
 """
-The calibration parameters, and the model's qualifying lap for a set of them on a reference lap's path.
+The calibration parameters, and the model's lap for a set of them on a reference lap's path.
 """
 import contextlib
 import copy
@@ -73,11 +73,12 @@ def model_track(reference: ReferenceLap, g_max: Optional[float] = G_MAX):
 
 def model_lap(params: Mapping[str, float], reference: ReferenceLap):
     """
-    The model's optimal qualifying lap with these parameters, on the reference lap's (bounded) path and weather.
-    params may hold "g_max" for the curvature bound (default G_MAX; 0 or None for no bound).
+    The model's optimal push lap with these parameters, on the reference lap's (bounded) path and weather, under
+    its session's energy rules. params may hold "g_max" for the curvature bound (default G_MAX; 0 or None for no
+    bound).
     """
     vehicle, tires = car_for(params, reference.air_density)
-    ers = get_ers_config("2026", session="qualifying", event=reference.round)
+    ers = get_ers_config("2026", session=reference.rules, event=reference.round)
     track = model_track(reference, params.get("g_max", G_MAX))
     solver = SpatialNLPSolver(VehicleDynamicsModel(vehicle, ers, tires), track, ers)
     solver.verbose = False

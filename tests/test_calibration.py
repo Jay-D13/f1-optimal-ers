@@ -6,10 +6,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from calibration.dataset import good_rounds, lap_distances
+from calibration.dataset import ReferenceLap, good_rounds, lap_distances
 from calibration.fit import Fit
 from calibration.model import PARAMETERS, car_for, start_values
 from calibration.practice import bound_curvature
+from config.events import EVENTS_2026
 from models import F1TrackModel
 from models.geometry import TrackGeometry
 
@@ -41,6 +42,17 @@ class DatasetTests(unittest.TestCase):
         s = lap_distances(xy, np.full(len(seconds), 50.0), seconds, track)
         self.assertLess(np.abs(s - s_true).max(), 3.0)
         self.assertTrue(np.all(np.diff(s) > 0))
+
+
+class PracticeLapTests(unittest.TestCase):
+    def test_practice_caps_are_never_below_qualifying(self):
+        for event in EVENTS_2026.values():
+            with self.subTest(event=event.name):
+                self.assertGreaterEqual(event.practice_recharge_mj, event.quali_recharge_mj)
+
+    def test_old_reference_pickles_default_to_qualifying_rules(self):
+        reference = ReferenceLap.__new__(ReferenceLap)          # As unpickled from a cache without the field
+        self.assertEqual(reference.rules, "qualifying")
 
 
 class PracticeBoundTests(unittest.TestCase):
