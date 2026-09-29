@@ -49,6 +49,11 @@ _WEAR_STATES = ("WF", "WR")
 
 V_MIN = 5.0  # Lower speed bound (m/s)
 
+
+def _smooth_min(a, b, width):
+    """min(a, b), rounded over about `width` so it stays smooth for Ipopt."""
+    return 0.5 * (a + b - ca.sqrt((a - b) ** 2 + width**2))
+
 # NLP controls (see _build_and_solve)
 CONTROLS = ("P_DEPLOY", "P_HARVEST", "THROTTLE", "BRAKE_F", "BRAKE_R")
 
@@ -82,6 +87,9 @@ class SpatialNLPSolver(BaseSolver):
     BRAKE_COST = 1e-5
     # Width (W) over which the NLP rounds the deploy curve's corners, so Ipopt sees smooth constraints
     CURVE_SMOOTHING = 2e3
+    # Where the ramp-down rules apply (C5.12.7): at full throttle and above 210 km/h
+    RAMP_FULL_THROTTLE = 0.99
+    RAMP_MIN_SPEED = 210.0 / 3.6
 
     def __init__(
         self,
@@ -163,6 +171,18 @@ class SpatialNLPSolver(BaseSolver):
             is_flying_lap=is_flying_lap,
             run_up=run_up,
         )
+        if self.vehicle.ers.ramp_rate is not None:
+            # Second solve with the ramp-down rules inside the first solution's full-throttle runs
+            runs = self._full_throttle_runs(trajectory, run_up)
+            self._log(f"Ramp-down rules on {len(runs)} full-throttle runs; solving again")
+            trajectory = self._build_and_solve(
+                v_guess=np.clip(trajectory.v_opt[: self.N + 1], V_MIN, V_MAX),
+                initial_soc=initial_soc,
+                final_soc_min=final_soc_min,
+                is_flying_lap=is_flying_lap,
+                run_up=run_up,
+                ramp_runs=runs,
+            )
         trajectory.solve_time = time.time() - start_time
 
         self._log(f"✓ Solved in {trajectory.solve_time:.2f}s")
@@ -178,6 +198,23 @@ class SpatialNLPSolver(BaseSolver):
                 flying_lap=is_flying_lap
             ).v
         return np.clip(self._sample_on_grid(v_guess), V_MIN, V_MAX)
+
+    def _full_throttle_runs(self, trajectory: OptimalTrajectory, run_up: int) -> list:
+        """
+        Horizon node ranges where a solution is at full throttle above RAMP_MIN_SPEED, where the ramp-down
+        rules can apply. Nodes are offset by the run-up, whose own runs are left free.
+        """
+        full = (trajectory.node_controls["throttle"] >= self.RAMP_FULL_THROTTLE) & (trajectory.v_opt >= self.RAMP_MIN_SPEED)
+        runs, current = [], []
+        for k, on in enumerate(full):
+            if on:
+                current.append(run_up + k)
+            elif current:
+                runs.append(current)
+                current = []
+        if current:
+            runs.append(current)
+        return [run for run in runs if len(run) >= 2]
 
     def _run_up_intervals(self, v_grid: np.ndarray) -> int:
         """
@@ -273,6 +310,7 @@ class SpatialNLPSolver(BaseSolver):
         lap_grip_scales: np.ndarray | None = None,
         tire: DynamicTireSettings | None = None,
         run_up: int = 0,
+        ramp_runs: list | None = None,
     ) -> OptimalTrajectory:
         """
         Build and solve the CasADi optimization problem over n_laps consecutive laps.
@@ -282,6 +320,7 @@ class SpatialNLPSolver(BaseSolver):
         run_up > 0 adds that many intervals before the start line: the qualifying run-up from the last corner
         (REG-8). It isn't timed, the store is full at its start and its recharge doesn't count toward the
         lap's cap. Without a run-up, a flying lap is periodic in speed.
+        ramp_runs lists node ranges (full-throttle runs) inside which the ramp-down rules apply.
         """
         opti = ca.Opti()
 
@@ -511,6 +550,24 @@ class SpatialNLPSolver(BaseSolver):
                 if w_n[i] > 0.5 or w_n[i + 1] > 0.5:
                     change = (W[i + 1] - W[i]) * 0.5 * (V[i] + V[i + 1])
                     opti.subject_to(opti.bounded(-max_step, change, max_step))
+
+        # Ramp-down at full throttle (C5.12.4-7, REG-6), inside the full-throttle runs found by a first solve.
+        # A floor state tracks the ERS-K deploy above the release level: the deploy may sit at most one first
+        # step below the floor, and the floor falls at most at the ramp rate. Cuts the deploy curve forces are
+        # exempt. Outside the runs (lifting, braking, below 210 km/h) the rules don't apply.
+        for run in ramp_runs or []:
+            FLOOR = opti.variable(len(run))
+            release, step = ers.ramp_release / PS, ers.ramp_first_step / PS
+            for m, j in enumerate(run):
+                excess = U["P_DEPLOY"][j] / ETA_K - release
+                curve = deploy_power_limit(V[j], ers, smooth=self.CURVE_SMOOTHING) / PS - release
+                opti.subject_to(excess >= _smooth_min(FLOOR[m], curve, self.CURVE_SMOOTHING / PS))
+                opti.subject_to(FLOOR[m] >= excess - step)
+                if m > 0:
+                    i = run[m - 1]
+                    change = (FLOOR[m] - FLOOR[m - 1]) * 0.5 * (V[i] + V[j])
+                    opti.subject_to(change >= -ers.ramp_rate * self.ds / PS)
+            opti.set_initial(FLOOR, np.zeros(len(run)))
 
         # Velocity boundary condition. With a run-up, the lap starts at whatever speed the run-up gives.
         if r > 0:

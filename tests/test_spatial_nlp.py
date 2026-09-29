@@ -105,6 +105,18 @@ class QualifyingRulesTests(unittest.TestCase):
                  - t.energy_recovered / eta_k * ers.recovery_efficiency)
         self.assertAlmostEqual(stored, moved, delta=1e3)  # J
 
+    def test_ramp_down(self):
+        # Above 210 km/h at full throttle, the deploy never drops by more than the first step between nodes
+        # (C5.12.4); the deploy curve's own cuts (C5.2.8) are exempt
+        t, nodes = self.trajectory, self.trajectory.node_controls
+        deploy = nodes["P_deploy"] / self.ers.mgu_k_efficiency
+        limit = np.array([float(deploy_power_limit(v, self.ers)) for v in t.v_opt])
+        for k in range(len(deploy) - 1):
+            at_speed = min(t.v_opt[k], t.v_opt[k + 1]) > 215 / 3.6
+            full = min(nodes["throttle"][k], nodes["throttle"][k + 1]) > 0.999
+            if at_speed and full and deploy[k + 1] < limit[k + 1] - 5e3:
+                self.assertLessEqual(deploy[k] - deploy[k + 1], self.ers.ramp_first_step + 5e3, k)
+
     def test_deploy_follows_the_curve(self):
         nodes = self.trajectory.node_controls
         limit = np.array([float(deploy_power_limit(v, self.ers)) for v in self.trajectory.v_opt])

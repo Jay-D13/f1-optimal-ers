@@ -74,6 +74,11 @@ class ERSConfig:
     superclip_power: Optional[float] = None
     # Qualifying lap: start with a full store, include the run-up from the last corner, finish anywhere
     qualifying: bool = False
+    # Ramp-down of the ERS-K power at full throttle (C5.12.4-7): a first step of at most ramp_first_step,
+    # then at most ramp_rate, while the ERS-K DC power is above ramp_release. None: no ramp rules.
+    ramp_rate: Optional[float] = None       # [W/s]
+    ramp_first_step: float = 150e3          # [W]
+    ramp_release: float = 100e3             # [W]
     
     @property
     def usable_soc_range(self) -> float:
@@ -148,6 +153,7 @@ def get_ers_config(
         qualifying=True,
         recovery_limit_per_lap=(found.quali_recharge_mj if found else 8.5) * 1e6,
         superclip_power=(found.superclip_kw if found else 350.0) * 1e3,
+        ramp_rate=(found.ramp_rate_kw_s if found else 100.0) * 1e3,
     )
 
 
