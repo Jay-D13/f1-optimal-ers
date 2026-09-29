@@ -250,7 +250,7 @@ python main.py [OPTIONS]
 | `--ipopt-linear-solver` | str | `mumps` | Ipopt linear solver backend (advanced) |
 | `--ipopt-hessian` | str | `exact` | Ipopt Hessian mode: `exact`, or `limited-memory` (faster per iteration, but can stop seconds away from the optimum) |
 | `--flying-lap/--no-flying-lap` | flag | `True` | Continuous lap (no standing start) |
-| `--use-tumftm/--no-use-tumftm` | flag | `False` | Prefer TUMFTM raceline if available |
+| `--use-tumftm/--no-use-tumftm` | flag | `False` | Use the TUMFTM raceline, placed on the FastF1 session (height, timing line, Straight Mode zones); flat if the session is unavailable or its layout has changed |
 | `--plot/--no-plot` | flag | `True` | Enable or disable visualization plots |
 | `--save-animation/--no-save-animation` | flag | `False` | Enable or disable animated lap visualization |
 | `--solver` | str | `nlp` | Solver type (nlp is fully implemented) |
@@ -331,8 +331,11 @@ track.load_from_fastf1(driver='VER')   # driver only picks the lap kept for plot
 Minimum-curvature optimal racing lines from [TUMFTM's racetrack database](https://github.com/TUMFTM/racetrack-database):
 
 ```python
-track.load_from_tumftm_raceline('data/racelines/monaco.csv')
+track.load_from_tumftm_raceline('data/racelines/monza.csv')                    # flat, in TUM's frame
+track.load_from_fastf1(raceline='data/racelines/monza.csv')                   # placed on the FastF1 session
 ```
+
+`--use-tumftm` places the raceline on the session: it is registered onto the FastF1 line (rotation and shift), takes that line's height, starts at its timing line, and gets the FIA Straight Mode zones. A raceline more than 15 m from the session's layout anywhere is refused: 2026 Melbourne and Barcelona have changed since the TUM data were made.
 
 - **Pros**: Smoother curvature, theoretically optimal racing line
 - **Cons**: May not match actual F1 racing line (different constraints)

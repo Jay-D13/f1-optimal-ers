@@ -10,7 +10,7 @@ import fastf1 as ff1
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .geometry import TrackGeometry, fit_track
+from .geometry import TrackGeometry, fit_track, register_rigid
 
 CACHE_DIR = Path("data/cache")
 
@@ -216,3 +216,36 @@ def zone_intervals(activation_points, corners: dict, length: float) -> List[Tupl
         end = marker_s[np.argmin(np.where(ahead > 1.0, ahead, np.inf))]
         zones.append((float(start), float(end)))
     return zones
+
+
+def place_raceline(raceline_xy: np.ndarray, map_line: TrackGeometry, source: str = "",
+                   xy_smoothing: float = 10.0) -> Tuple[TrackGeometry, float]:
+    """
+    A raceline drawn in its own frame (TUM, x/y only) placed onto a session's map line: moved into the map's
+    frame, given the map's height, and started at the map's timing line.
+
+    Returns the raceline geometry and the largest plan-view distance between the two lines after registration.
+    Up to about 10 m is normal, since they are different lines; 2026 Melbourne and Barcelona, whose layouts
+    changed after the TUM data were made, reach 32 m and 44 m.
+    """
+    raceline_xy = np.asarray(raceline_xy, dtype=float)
+    R, t, _ = register_rigid(raceline_xy, np.column_stack([map_line.x, map_line.y]))
+    xy = raceline_xy @ R.T + t
+
+    # Map distance of each raceline point, in the plan view. Where the track crosses itself the nearest map
+    # point can be on the other level, so each distance must follow on from its neighbours along the lap.
+    gaps, nearest = cKDTree(np.column_stack([map_line.x, map_line.y])).query(xy)
+    s_map = map_line.s[nearest]
+    if np.median(np.diff(np.unwrap(s_map * 2 * np.pi / map_line.length))) < 0:
+        xy, s_map = xy[::-1], s_map[::-1]          # Drawn against the driving direction
+    along = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
+    along *= map_line.length / (along[-1] + np.linalg.norm(xy[0] - xy[-1]))
+    wrap = lambda d: (d + 0.5 * map_line.length) % map_line.length - 0.5 * map_line.length
+    offset = s_map[0] + np.median(wrap(s_map - along - s_map[0]))
+    stray = np.abs(wrap(s_map - along - offset)) > 50.0
+    s_map[stray] = (along[stray] + offset) % map_line.length
+    z = np.interp(s_map, map_line.s, map_line.z, period=map_line.length)
+
+    geometry = fit_track([np.column_stack([xy, z])], xy_smoothing=xy_smoothing, source=source)
+    line_point = np.array([[map_line.x[0], map_line.y[0], map_line.z[0]]])
+    return geometry.shifted(float(geometry.project(line_point)[0])), float(gaps.max())

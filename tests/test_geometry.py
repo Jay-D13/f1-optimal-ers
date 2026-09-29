@@ -152,6 +152,26 @@ class FindRoundTests(unittest.TestCase):
             telemetry.find_round(2026, "Monz")
 
 
+class PlaceRacelineTests(unittest.TestCase):
+    def test_raceline_takes_the_map_frame_height_and_line(self):
+        laps, speeds, length, (a, b) = oval_laps()
+        map_line = fit_track(laps, speeds=speeds).shifted(123.0)          # Timing line 123 m into the fit
+        # The same oval 2 m inside, drawn clockwise from another point, rotated and moved in its own frame
+        t = np.linspace(0, 2 * np.pi, 1200, endpoint=False)
+        inner = np.column_stack([(a - 2) * np.cos(t), (b - 2) * np.sin(t)])
+        inner = np.roll(inner, 300, axis=0)[::-1]
+        angle = np.radians(70.0)
+        R = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+        placed, gap = telemetry.place_raceline(inner @ R.T + [500.0, -800.0], map_line)
+        self.assertLess(gap, 3.0)
+        self.assertAlmostEqual(placed.heading_turns, 1.0, places=3)   # Driven anticlockwise, like the map
+        # Starts where the map's lap starts, and has the map's height along the lap
+        start = np.array([placed.x[0], placed.y[0]]) - [map_line.x[0], map_line.y[0]]
+        self.assertLess(np.linalg.norm(start), 3.0)
+        heights = np.interp(map_line.project(np.column_stack([placed.x, placed.y, placed.z])), map_line.s, map_line.z)
+        self.assertLess(np.abs(placed.z - heights).max(), 0.2)
+
+
 class StraightModeZoneTests(unittest.TestCase):
     CORNERS = {"1": 900.0, "2": 950.0, "3": 1450.0, "4": 2100.0, "11": 5300.0}
     LENGTH = 5760.0

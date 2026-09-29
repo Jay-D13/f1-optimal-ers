@@ -218,12 +218,18 @@ def main(args):
     track = F1TrackModel(year=args.year, gp=args.track, ds=args.ds)
     driver = args.driver #if args.driver else 'VER' # DU DU DU DUUU MAX VERSTAPPEN
     
-    # Try TUMFTM raceline first, fallback to FastF1
+    # With --use-tumftm, the TUMFTM raceline placed on the FastF1 session (height, timing line, Straight Mode
+    # zones), or on its own if the session can't be loaded or its layout has changed; otherwise the FastF1 line
     tumftm_path = find_tumftm_raceline(args.track)
     
     if tumftm_path is not None and args.use_tumftm:
         print(f"   Loading TUMFTM raceline: {tumftm_path}")
-        track.load_from_tumftm_raceline(str(tumftm_path))
+        try:
+            _, driver = track.load_from_fastf1(driver=args.driver, raceline=str(tumftm_path))
+        except Exception as e:
+            print(f"   ⚠ Raceline not placed on the FastF1 session ({e}); flat raceline without zones")
+            track = F1TrackModel(year=args.year, gp=args.track, ds=args.ds)
+            track.load_from_tumftm_raceline(str(tumftm_path))
     else:
         print(f"   Loading from FastF1 ({args.year} {args.track})...")
         try:

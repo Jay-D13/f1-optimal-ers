@@ -58,7 +58,7 @@ def cli(
     track: Annotated[str, typer.Option(help="Grand Prix name (e.g. Monaco, Monza, Spa)")] = "Monaco",
     year: Annotated[int, typer.Option(help="Season year for FastF1 telemetry")] = 2024,
     driver: Annotated[Optional[str], typer.Option(help="Driver code for telemetry (e.g. VER, LEC)")] = None,
-    use_tumftm: Annotated[bool, typer.Option("--use-tumftm/--no-use-tumftm", help="Prefer TUMFTM raceline over FastF1")] = False,
+    use_tumftm: Annotated[bool, typer.Option("--use-tumftm/--no-use-tumftm", help="Use the TUMFTM raceline, placed on the FastF1 session for height, timing line and Straight Mode zones")] = False,
 
     # ── Energy / SOC ──────────────────────────────────────────────
     initial_soc: Annotated[float, typer.Option(help="Battery state-of-charge at start [0-1]")] = 0.5,

@@ -15,7 +15,10 @@ from scipy.interpolate import interp1d, UnivariateSpline
 
 from models.car import air_density
 from config.events import find_event_2026
-from models.telemetry import corner_distances, load_session, session_geometry, zone_intervals
+from models.telemetry import corner_distances, load_session, place_raceline, session_geometry, zone_intervals
+
+# Largest distance (m) between a raceline and the session's map line before the layout counts as changed
+MAX_RACELINE_GAP = 15.0
 
 @dataclass
 class TrackSegment:
@@ -203,11 +206,13 @@ class F1TrackModel:
         print(f"   ✓ Loaded {n_points} points, {self.total_length:.0f}m total")
         return self
 
-    def load_from_fastf1(self, driver: Optional[str] = None, refresh: bool = False):
+    def load_from_fastf1(self, driver: Optional[str] = None, refresh: bool = False, raceline: Optional[str] = None):
         """
-        Load the track from FastF1: a geometry fitted to every clean lap of the session (models/telemetry.py),
-        so that it doesn't depend on the lap being predicted. The fastest lap (or the driver's) is kept in
-        telemetry_data for plots and comparisons.
+        Load the track from a FastF1 session: the line fitted to every clean lap (models/telemetry.py), or with
+        raceline, a TUM raceline file placed onto that line, which gives it the session's height, timing line
+        and Straight Mode zones. The live-timing positions are snapped to the provider's map line, which is not
+        the line the cars drive (TRK-10), so the raceline is the better path where its layout is current.
+        The fastest lap (or the driver's) is kept in telemetry_data for plots and comparisons.
         """
         session, round_number, location = load_session(self.year, self.gp, self.session_type)
         print(f"   {self.year} round {round_number}: {session.event['EventName']} ({location}), session {self.session_type}")
@@ -225,8 +230,18 @@ class F1TrackModel:
         self.telemetry_data = lap.get_telemetry()
 
         geometry = session_geometry(self.year, self.gp, self.session_type, refresh=refresh, loaded_session=session)
-        self.load_from_geometry(geometry)
         self.data_source = 'fastf1'
+        if raceline is not None:
+            xy = np.loadtxt(raceline, delimiter=',', comments='#')[:, :2]
+            placed, gap = place_raceline(xy, geometry, source=f"{Path(raceline).name} on {geometry.source}")
+            if gap > MAX_RACELINE_GAP:
+                raise ValueError(
+                    f"{raceline} is up to {gap:.0f} m from the {self.year} layout: the circuit has changed since"
+                )
+            print(f"   Raceline {Path(raceline).name} placed on the session (largest gap {gap:.1f} m)")
+            geometry = placed
+            self.data_source = 'tumftm+fastf1'
+        self.load_from_geometry(geometry)
 
         event = find_event_2026(round_number) if self.year == 2026 else None
         if event is not None and event.straight_mode_zones:

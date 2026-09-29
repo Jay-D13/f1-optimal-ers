@@ -221,3 +221,33 @@ def fit_track(
     # Vertical curvature: rate of change of the gradient along the lap (periodic central difference)
     kappa_v = (np.roll(gradient, -1) - np.roll(gradient, 1)) / (2.0 * step)
     return TrackGeometry(s, x, y, z, kappa, gradient, kappa_v, length, source)
+
+
+def register_rigid(source: np.ndarray, target: np.ndarray, step_deg: float = 5.0, iterations: int = 50):
+    """
+    Rotation R and translation t that best place the closed plan-view line `source` onto `target` (both n × 2),
+    by iterative closest points from a coarse search over rotations. The two lines may differ (a racing line
+    against a centreline), so the fit is only as good as their mean distance, which is also returned.
+
+    Returns (R, t, mean_distance): target ≈ source @ R.T + t.
+    """
+    source, target = np.asarray(source, dtype=float), np.asarray(target, dtype=float)
+    tree = cKDTree(target)
+    best = None
+    for angle in np.radians(np.arange(0.0, 360.0, step_deg)):
+        R = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+        t = target.mean(axis=0) - source.mean(axis=0) @ R.T
+        for _ in range(iterations):
+            moved = source @ R.T + t
+            _, nearest = tree.query(moved)
+            matched = target[nearest]
+            # Kabsch step on the matched pairs
+            mean_moved, mean_matched = moved.mean(axis=0), matched.mean(axis=0)
+            U, _, Vt = np.linalg.svd((moved - mean_moved).T @ (matched - mean_matched))
+            D = np.diag([1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
+            step_R = Vt.T @ D @ U.T
+            R, t = step_R @ R, step_R @ (t - mean_moved) + mean_matched
+        distance = float(tree.query(source @ R.T + t)[0].mean())
+        if best is None or distance < best[2]:
+            best = (R, t, distance)
+    return best
