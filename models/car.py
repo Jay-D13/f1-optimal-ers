@@ -132,13 +132,15 @@ class CarModel:
         self.load_transfer = self.mass * vehicle.h_cog / wheelbase  # Load moved to the rear axle per m/s² of a_x
 
     # ------------------------------------------------------------------ aero
-    def aero_mode(self, radius):
+    def aero_mode(self, radius, zones=None):
         """
-        Straight-Mode fraction w at each track point (0 = Corner Mode, 1 = Straight Mode).
+        Where Straight Mode is allowed (1) or not (0), at each track point. Earlier cars have one mode.
 
-        Until the FIA activation zones are modelled (ROADMAP Phase 2, REG-5), 2026 cars use Straight Mode
-        wherever the radius exceeds straight_mode_min_radius. Earlier cars have one mode.
+        zones is the FIA zone mask when the track has one; otherwise 2026 cars may use Straight Mode wherever
+        the radius exceeds straight_mode_min_radius.
         """
+        if zones is not None:
+            return np.asarray(zones, dtype=float) * (self.vehicle.regulation_year >= 2026)
         threshold = self.vehicle.straight_mode_min_radius
         if _is_casadi(radius):
             return 0.0 if self.vehicle.regulation_year < 2026 else ca.if_else(ca.fabs(radius) > threshold, 1.0, 0.0)

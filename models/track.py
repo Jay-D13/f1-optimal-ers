@@ -9,12 +9,13 @@ import pandas as pd
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from scipy.interpolate import interp1d, UnivariateSpline
 
 from models.car import air_density
-from models.telemetry import load_session, session_geometry
+from config.events import find_event_2026
+from models.telemetry import corner_distances, load_session, session_geometry, zone_intervals
 
 @dataclass
 class TrackSegment:
@@ -89,6 +90,9 @@ class F1TrackModel:
 
         # Air density from the session's weather (kg/m³), when the session has weather data
         self.air_density: Optional[float] = None
+
+        # FIA Straight Mode zones as (start, end) lap distances (m), when known (2026 FastF1 tracks)
+        self.straight_mode_zones: Optional[List[Tuple[float, float]]] = None
         
     def load_from_tumftm_raceline(self, raceline_path: str,
                                    track_params: Optional[dict] = None):
@@ -223,7 +227,30 @@ class F1TrackModel:
         geometry = session_geometry(self.year, self.gp, self.session_type, refresh=refresh, loaded_session=session)
         self.load_from_geometry(geometry)
         self.data_source = 'fastf1'
+
+        event = find_event_2026(round_number) if self.year == 2026 else None
+        if event is not None and event.straight_mode_zones:
+            corners = corner_distances(session, geometry)
+            if corners is None:
+                print("   ⚠ No corner markers in FastF1: Straight Mode zones fall back to the radius heuristic")
+            else:
+                self.straight_mode_zones = zone_intervals(event.straight_mode_zones, corners, geometry.length)
+                spans = ", ".join(f"{a:.0f}–{b:.0f}" for a, b in self.straight_mode_zones)
+                print(f"   Straight Mode zones (m): {spans}")
+        elif event is not None:
+            self.straight_mode_zones = []
         return self, lap['Driver']
+
+    def straight_mode_mask(self, s) -> Optional[np.ndarray]:
+        """1.0 where lap distance s lies in an FIA Straight Mode zone, else 0.0; None when the zones are unknown."""
+        if self.straight_mode_zones is None:
+            return None
+        s = np.mod(np.asarray(s, dtype=float), self.total_length)
+        mask = np.zeros_like(s)
+        for start, end in self.straight_mode_zones:
+            inside = (s >= start) & (s <= end) if start <= end else (s >= start) | (s <= end)
+            mask[inside] = 1.0
+        return mask
 
     def _compute_curvature_spline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """

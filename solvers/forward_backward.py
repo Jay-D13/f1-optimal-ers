@@ -71,7 +71,8 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         N = len(s)
         kappa = 1.0 / np.abs(radius)
         gradient = np.asarray(gradient, dtype=float)
-        w = car.aero_mode(radius)
+        mask = getattr(self.track, "straight_mode_mask", None)
+        w = car.aero_mode(radius, mask(s) if mask is not None else None)
 
         v_apex = self._cornering_speeds(kappa, gradient, w, kappa_v=kappa_v)
         a_max, a_min = self._acceleration_limits(kappa, gradient, w, kappa_v)

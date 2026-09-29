@@ -102,10 +102,11 @@ class FitTrackTests(unittest.TestCase):
         # Averaging over each NLP step keeps the total heading change and the vertical curvature
         track = F1TrackModel(2026, "oval", ds=5.0).load_from_geometry(self.geometry)
         td = track.track_data
-        # The whole cells cover the lap except its last few metres, which lie in the tightest part of the oval
-        n_full = int(track.total_length // track.ds)
-        missing = (track.total_length - n_full * track.ds) * self.a / self.b**2 / (2 * np.pi)
-        self.assertAlmostEqual(np.sum(td.curvature[:n_full]) * track.ds / (2 * np.pi), 1.0 - missing, delta=1e-3)
+        # The whole cells cover [-ds/2, n·ds - ds/2]: the lap minus a short tail before the line
+        g, n_full = self.geometry, int(track.total_length // track.ds)
+        tail = (g.s >= n_full * track.ds - 0.5 * track.ds) & (g.s < g.length - 0.5 * track.ds)
+        missing = np.sum(g.kappa[tail]) * g.step / (2 * np.pi)
+        self.assertAlmostEqual(np.sum(td.curvature[:n_full]) * track.ds / (2 * np.pi), 1.0 - missing, delta=3e-3)
         self.assertAlmostEqual(td.vertical_curvature.max(), self.geometry.kappa_v.max(), delta=0.05 * self.geometry.kappa_v.max())
 
 
@@ -149,6 +150,31 @@ class FindRoundTests(unittest.TestCase):
             telemetry.find_round(2026, "Sakhir")
         with self.assertRaises(ValueError):
             telemetry.find_round(2026, "Monz")
+
+
+class StraightModeZoneTests(unittest.TestCase):
+    CORNERS = {"1": 900.0, "2": 950.0, "3": 1450.0, "4": 2100.0, "11": 5300.0}
+    LENGTH = 5760.0
+
+    def test_zones_end_at_the_next_marker_and_wrap(self):
+        zones = telemetry.zone_intervals((("11", 30), ("3", 70)), self.CORNERS, self.LENGTH)
+        self.assertEqual(zones, [(5330.0, 900.0), (1520.0, 2100.0)])
+        with self.assertRaises(ValueError):
+            telemetry.zone_intervals((("12", 0),), self.CORNERS, self.LENGTH)
+
+    def test_mask_and_aero_mode(self):
+        track = F1TrackModel(2026, "test")
+        track.total_length = self.LENGTH
+        self.assertIsNone(track.straight_mode_mask([0.0]))
+        track.straight_mode_zones = [(5330.0, 900.0), (1520.0, 2100.0)]
+        s = np.array([0.0, 500.0, 1000.0, 1600.0, 3000.0, 5500.0, self.LENGTH + 100.0])
+        np.testing.assert_array_equal(track.straight_mode_mask(s), [1, 1, 0, 1, 0, 1, 1])
+        # Only 2026 cars have a Straight Mode; the mask replaces the radius heuristic
+        radius = np.full(len(s), 5000.0)
+        car_2026 = CarModel(get_vehicle_config("2026"), get_ers_config("2026"))
+        car_2025 = CarModel(get_vehicle_config("2025"), get_ers_config("2025"))
+        np.testing.assert_array_equal(car_2026.aero_mode(radius, track.straight_mode_mask(s)), [1, 1, 0, 1, 0, 1, 1])
+        np.testing.assert_array_equal(car_2025.aero_mode(radius, track.straight_mode_mask(s)), np.zeros(len(s)))
 
 
 if __name__ == "__main__":

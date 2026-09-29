@@ -46,6 +46,18 @@ class TrackGeometry:
         """Unsigned radius (m), capped at 10 km on straights like the TUM loader."""
         return np.clip(1.0 / np.maximum(np.abs(self.kappa), 1e-6), 10.0, 10000.0)
 
+    def project(self, points: np.ndarray) -> np.ndarray:
+        """Lap distance (m) of the nearest line point to each of the (n × 3) points."""
+        _, nearest = cKDTree(np.column_stack([self.x, self.y, self.z])).query(np.asarray(points, dtype=float))
+        return self.s[nearest]
+
+    def shifted(self, s0: float) -> "TrackGeometry":
+        """The same line with the lap starting at distance s0 (to the nearest grid point)."""
+        k = int(round(s0 / self.step)) % len(self.s)
+        roll = lambda a: np.roll(a, -k)
+        return TrackGeometry(self.s, roll(self.x), roll(self.y), roll(self.z), roll(self.kappa), roll(self.gradient),
+                             roll(self.kappa_v), self.length, self.source)
+
     def to_csv(self, path) -> None:
         header = f"source={self.source}; length={self.length:.3f}\ns,x,y,z,kappa,gradient,kappa_v"
         data = np.column_stack([self.s, self.x, self.y, self.z, self.kappa, self.gradient, self.kappa_v])
@@ -138,7 +150,8 @@ def fit_track(
     samples are clean (about 0.07 m RMS at Spa), but the vertical curvature is a second derivative.
 
     Args:
-        laps: one (n × 3) array of x, y, z positions (m) per lap, in driving order; the first is the reference
+        laps: one (n × 3) array of x, y, z positions (m) per lap, in driving order. The first curve is the lap
+            of median length, so that a lap with a glitch or an excursion doesn't set the shape
         speeds: optional speed (m/s) of every sample, one array per lap. With speeds, the horizontal smoothing
             wavelength is the distance covered in smoothing_time, at least min_smoothing: the lap time is
             sensitive to curvature errors as v², and the car cannot follow shorter features at speed anyway
@@ -149,7 +162,8 @@ def fit_track(
         iterations: projection and fit rounds; each one re-projects the samples onto the latest curve
         source: description stored with the geometry
     """
-    reference = np.asarray(laps[0], dtype=float)
+    lap_lengths = np.array([_closed_arc_length(np.asarray(lap, dtype=float))[-1] for lap in laps])
+    reference = np.asarray(laps[np.argsort(lap_lengths)[len(laps) // 2]], dtype=float)
     pooled = np.vstack([np.asarray(lap, dtype=float) for lap in laps])
     if speeds is not None:
         xy_smoothing = np.maximum(np.concatenate(speeds) * smoothing_time, min_smoothing)
@@ -157,19 +171,30 @@ def fit_track(
     # Start from the reference lap as a closed polyline
     curve = reference
     s_curve = _closed_arc_length(curve)
+    keep = np.ones(len(pooled), dtype=bool)
     for _ in range(iterations):
         length = s_curve[-1]
         # Distance along the lap of every pooled sample: its nearest point on the current curve
         dense_s = np.arange(0.0, length, 0.25)
         dense = np.column_stack([np.interp(dense_s, s_curve, np.append(curve[:, c], curve[0, c])) for c in range(3)])
-        _, nearest = cKDTree(dense[:, :2]).query(pooled[:, :2])
+        # In 3D, so samples on a bridge are not projected onto the road beneath (Suzuka's crossover)
+        _, nearest = cKDTree(dense).query(pooled)
         s_samples = dense_s[nearest]
 
+        local_xy = xy_smoothing[keep] if np.ndim(xy_smoothing) else xy_smoothing
         splines = [
-            _PeriodicSpline(s_samples, pooled[:, 0], length, xy_smoothing),
-            _PeriodicSpline(s_samples, pooled[:, 1], length, xy_smoothing),
-            _PeriodicSpline(s_samples, pooled[:, 2], length, z_smoothing),
+            _PeriodicSpline(s_samples[keep], pooled[keep, 0], length, local_xy),
+            _PeriodicSpline(s_samples[keep], pooled[keep, 1], length, local_xy),
+            _PeriodicSpline(s_samples[keep], pooled[keep, 2], length, z_smoothing),
         ]
+        # Outliers for the next round: samples far from the fit, beyond 2 m across or 1 m in height and six
+        # times the median residual (laps lie within a few centimetres of each other: see lap_positions). The height feed has wrong-level samples where the track crosses itself
+        # (up to 7 m off at Suzuka's bridge), and the positions have occasional jumps.
+        residual_xy = np.hypot(splines[0](s_samples) - pooled[:, 0], splines[1](s_samples) - pooled[:, 1])
+        residual_z = np.abs(splines[2](s_samples) - pooled[:, 2])
+        keep = (residual_xy < max(2.0, 6.0 * np.median(residual_xy[keep]))) & (
+            residual_z < max(1.0, 6.0 * np.median(residual_z[keep]))
+        )
         # The fitted curve, finely sampled, becomes the next projection target
         fine_s = np.arange(0.0, length, 0.5)
         curve = np.column_stack([spline(fine_s) for spline in splines])
@@ -177,6 +202,9 @@ def fit_track(
 
     # Evaluate on a periodic grid of true arc length, with the step adjusted to divide the lap
     length = s_curve[-1]
+    typical = np.median(lap_lengths)
+    if abs(length - typical) > 0.03 * typical:
+        raise ValueError(f"Fitted lap is {length:.0f} m but the laps are about {typical:.0f} m: the line has a loop or a gap")
     n_points = max(int(round(length / step)), 1)
     step = length / n_points
     s = np.arange(n_points) * step

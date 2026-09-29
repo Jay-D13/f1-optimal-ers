@@ -247,7 +247,9 @@ class SpatialNLPSolver(BaseSolver):
         gradient = self._sample_on_grid(td.gradient)
         kappa_v = getattr(td, "vertical_curvature", None)
         kappa_v = np.zeros_like(gradient) if kappa_v is None else self._sample_on_grid(kappa_v)
-        return 1.0 / np.abs(radius), gradient, self.car.aero_mode(radius), kappa_v
+        mask = getattr(self.track, "straight_mode_mask", None)
+        zones = mask(self.s_grid) if mask is not None else None
+        return 1.0 / np.abs(radius), gradient, self.car.aero_mode(radius, zones), kappa_v
 
     def _point_dynamics(self, opti, x, u, kappa, gradient, kappa_v, w, grip_scale, tire, add_constraints):
         """

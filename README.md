@@ -313,15 +313,18 @@ The project supports two primary data sources, and **the choice significantly af
 
 ### 1. FastF1 Telemetry (Default)
 
-Real telemetry data from official F1 timing:
+A line fitted to the position samples of every clean lap of a session (all drivers). **Caveat:** the live-timing positions are snapped to the timing provider's own map of the circuit (all laps lie within about 2 cm of each other), so this is that map line, not the line the cars drive. It sits near the centreline at some circuits (Shanghai, Suzuka) and near a racing line at others (Monza, Spa), and has sharp polyline corners in places (Shanghai T16). Its elevation, timing line and corner positions are sound; its curvature is not a driven line.
 
 ```python
-track.load_from_fastf1(driver='VER')
+track.load_from_fastf1(driver='VER')   # driver only picks the lap kept for plots
 ```
 
-- **Pros**: Real GPS coordinates, actual driver speed profiles, sector times
-- **Cons**: GPS noise in curvature calculation, varies by session/driver
-- **Best for**: Comparing against real performance, specific track configurations
+- The event is found by round number or exact name (`--track 13`, `Monza`, `Catalunya`); ambiguous names such as `Spain` in 2026 stop with the list of rounds.
+- Clean laps: within 107 % of the fastest, no pit laps, no deleted laps, green track status. Frozen 2026 car-data blocks (throttle ≥ 104 with the brake on) are dropped.
+- Each coordinate is a penalised periodic spline of lap distance. The horizontal smoothing follows the speed (0.8 s of travel, at least 20 m), so noise doesn't become curvature on the straights; the elevation uses 80 m. Samples far from the fit are dropped between rounds (the height feed puts some samples on the wrong level where a track crosses itself).
+- The result has curvature, gradient and vertical curvature on a 1 m grid, starts at the timing line, and is cached in `data/cache/geometry/`.
+- For 2026 events, the FIA Straight Mode zones (`config/events.py`) are placed from FastF1's corner markers; each zone ends at the next corner.
+- Two geometries built from disjoint halves of the drivers give lap times within 0.06 % on all 15 rounds of 2026 (expected, given the snapping).
 
 ### 2. TUMFTM Racelines
 
@@ -505,9 +508,13 @@ f1-ers-optimal-control/
 ├── config/
 │   ├── __init__.py
 │   ├── ers.py              # ERS regulations (2025/2026)
+│   ├── events.py           # 2026 per-event energy rules and Straight Mode zones
 │   └── vehicle.py          # Vehicle parameters, tire model
 ├── models/
 │   ├── __init__.py
+│   ├── car.py              # Car model shared by the solvers
+│   ├── geometry.py         # Closed 3D line fitted to pooled laps
+│   ├── telemetry.py        # FastF1 events, clean laps, cached geometry, Straight Mode zones
 │   ├── track.py            # Track loading (FastF1/TUMFTM)
 │   └── vehicle_dynamics.py # Physics model (CasADi)
 ├── solvers/
@@ -610,7 +617,7 @@ x[k+1] = x[k] + (h/6)·(f[k] + 4·f_mid + f[k+1])       # Simpson quadrature
 ### Modeling Fidelity
 
 - [ ] **Dynamic Tire Model**: Upgrade the static "friction circle with load-dependent coefficients" to include thermal degradation and wear factors for multi-lap accuracy.
-- [ ] **3D Track Geometry**: Integrate elevation and banking data to improve the accuracy of the "vehicle dynamics and track geometry" constraints.
+- [x] **3D Track Geometry**: elevation (gradient and vertical curvature) from pooled telemetry. Banking is not modelled.
 
 ### Analysis & Validation
 
