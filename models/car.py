@@ -161,19 +161,27 @@ class CarModel:
         """Total aerodynamic downforce (N)."""
         return 0.5 * self.vehicle.rho_air * v**2 * self.downforce_area(w)
 
-    def resistance(self, v, kappa=0.0, gradient=0.0, w=0.0):
+    def road_normal_force(self, v, gradient=0.0, kappa_v=0.0):
+        """
+        Normal force from gravity and the road's vertical curvature (N), without downforce.
+
+        kappa_v is the rate of change of the gradient along the path (1/m): positive in a dip, where the car
+        is pressed into the road, negative over a crest, where it goes light.
+        """
+        return self.mass * (self.vehicle.g * _cos(gradient) + kappa_v * v**2)
+
+    def resistance(self, v, kappa=0.0, gradient=0.0, w=0.0, kappa_v=0.0):
         """Forces opposing motion (N): drag (plus the optional cornering term), rolling resistance and the slope."""
         veh = self.vehicle
         drag = 0.5 * veh.rho_air * v**2 * self.drag_area(w) + veh.cornering_drag_coeff * _abs(kappa) * v**2
-        rolling = veh.f_roll * (self.mass * veh.g * _cos(gradient) + self.downforce(v, w))
+        rolling = veh.f_roll * (self.road_normal_force(v, gradient, kappa_v) + self.downforce(v, w))
         slope = self.mass * veh.g * _sin(gradient)
         return drag + rolling + slope
 
     # ----------------------------------------------------------------- tyres
-    def axle_loads(self, v, a_x, gradient=0.0, w=0.0):
+    def axle_loads(self, v, a_x, gradient=0.0, w=0.0, kappa_v=0.0):
         """Normal load on the front and rear axle (N). Accelerating moves load to the rear."""
-        veh = self.vehicle
-        weight = self.mass * veh.g * _cos(gradient)
+        weight = self.road_normal_force(v, gradient, kappa_v)
         downforce = self.downforce(v, w)
         transfer = self.load_transfer * a_x
         F_z_front = self.front_weight_share * weight + self.front_downforce_share * downforce - transfer
@@ -219,7 +227,8 @@ class CarModel:
         return p_deploy / self.ers.deployment_efficiency - p_harvest * self.ers.recovery_efficiency
 
     # -------------------------------------------------------------- the point
-    def point(self, v, kappa, gradient, w, drive_force, brake_front, brake_rear, grip_front=1.0, grip_rear=1.0) -> PointForces:
+    def point(self, v, kappa, gradient, w, drive_force, brake_front, brake_rear, grip_front=1.0, grip_rear=1.0,
+              kappa_v=0.0) -> PointForces:
         """
         Acceleration and per-axle forces at one point on the path.
 
@@ -228,8 +237,8 @@ class CarModel:
         """
         F_x_front = -brake_front
         F_x_rear = drive_force - brake_rear
-        a_x = (F_x_front + F_x_rear - self.resistance(v, kappa, gradient, w)) / self.mass
-        F_z_front, F_z_rear = self.axle_loads(v, a_x, gradient, w)
+        a_x = (F_x_front + F_x_rear - self.resistance(v, kappa, gradient, w, kappa_v)) / self.mass
+        F_z_front, F_z_rear = self.axle_loads(v, a_x, gradient, w, kappa_v)
         F_y_front, F_y_rear = self.axle_lateral_forces(v, kappa)
         F_x_max_front, F_y_max_front, F_x_max_rear, F_y_max_rear = self.axle_grip(F_z_front, F_z_rear, grip_front, grip_rear)
         return PointForces(
@@ -241,14 +250,14 @@ class CarModel:
             F_x_max_rear=F_x_max_rear, F_y_max_rear=F_y_max_rear,
         )
 
-    def longitudinal_limits(self, v, kappa, gradient, w, a_x, grip_front=1.0, grip_rear=1.0):
+    def longitudinal_limits(self, v, kappa, gradient, w, a_x, grip_front=1.0, grip_rear=1.0, kappa_v=0.0):
         """
         Longitudinal force each axle has left after its lateral force, at acceleration a_x (N, NumPy only).
 
         Returns (lateral_ok, available_front, available_rear); lateral_ok is False where an axle can't even carry
         its lateral force.
         """
-        F_z_front, F_z_rear = self.axle_loads(v, a_x, gradient, w)
+        F_z_front, F_z_rear = self.axle_loads(v, a_x, gradient, w, kappa_v)
         F_y_front, F_y_rear = self.axle_lateral_forces(v, kappa)
         F_x_max_front, F_y_max_front, F_x_max_rear, F_y_max_rear = self.axle_grip(F_z_front, F_z_rear, grip_front, grip_rear)
         lateral_front = (F_y_front / F_y_max_front) ** 2
@@ -258,16 +267,16 @@ class CarModel:
         available_rear = F_x_max_rear * np.sqrt(np.clip(1.0 - lateral_rear, 0.0, None))
         return lateral_ok, available_front, available_rear
 
-    def is_feasible(self, v, kappa, gradient, w, a_x, max_power, grip_front=1.0, grip_rear=1.0):
+    def is_feasible(self, v, kappa, gradient, w, a_x, max_power, grip_front=1.0, grip_rear=1.0, kappa_v=0.0):
         """
         Whether acceleration a_x is possible at speed v (NumPy, vectorised).
 
         Traction goes through the rear axle only, up to max_power (W). Braking is split between the axles
         as needed, up to the brake system's max_brake_force.
         """
-        needed = self.mass * a_x + self.resistance(v, kappa, gradient, w)   # Net tyre force (N)
+        needed = self.mass * a_x + self.resistance(v, kappa, gradient, w, kappa_v)   # Net tyre force (N)
         lateral_ok, available_front, available_rear = self.longitudinal_limits(
-            v, kappa, gradient, w, a_x, grip_front, grip_rear
+            v, kappa, gradient, w, a_x, grip_front, grip_rear, kappa_v
         )
         traction_ok = needed <= np.minimum(available_rear, max_power / v)
         braking_ok = -needed <= np.minimum(available_front + available_rear, self.vehicle.max_brake_force)

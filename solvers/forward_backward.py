@@ -41,14 +41,22 @@ class ForwardBackwardSolver(VelocityProfileSolver):
 
         print("==== Solving grip-limited velocity profile (Standing Start)...====")
         td = self.track.track_data
-        return self._solve_core(td.s, td.radius, td.gradient, td.ds)
+        return self._solve_core(td.s, td.radius, td.gradient, td.ds, self._vertical_curvature())
+
+    def _vertical_curvature(self):
+        """The track's vertical curvature (1/m), zero when the loader has none."""
+        td = self.track.track_data
+        kappa_v = getattr(td, "vertical_curvature", None)
+        return np.zeros(len(td.s)) if kappa_v is None else np.asarray(kappa_v, dtype=float)
 
     def _solve_flying(self) -> VelocityProfile:
         """Solve two consecutive laps; the first is the run-up for the second."""
         td = self.track.track_data
         N = len(td.s)
         s_double = np.concatenate([td.s, td.s + td.total_length])
-        profile = self._solve_core(s_double, np.tile(td.radius, 2), np.tile(td.gradient, 2), td.ds)
+        profile = self._solve_core(
+            s_double, np.tile(td.radius, 2), np.tile(td.gradient, 2), td.ds, np.tile(self._vertical_curvature(), 2)
+        )
 
         v_flying = profile.v[N:]
         t_flying = np.concatenate([[0.0], np.cumsum(td.ds / np.maximum(0.5 * (v_flying[1:] + v_flying[:-1]), 1.0))])
@@ -57,7 +65,7 @@ class ForwardBackwardSolver(VelocityProfileSolver):
 
         return VelocityProfile(s=td.s, v=v_flying, a_x=profile.a_x[N:], t=t_flying, lap_time=t_flying[-1])
 
-    def _solve_core(self, s, radius, gradient, ds) -> VelocityProfile:
+    def _solve_core(self, s, radius, gradient, ds, kappa_v) -> VelocityProfile:
         """Forward-backward integration over the given points."""
         car = self.vehicle.car
         N = len(s)
@@ -65,8 +73,8 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         gradient = np.asarray(gradient, dtype=float)
         w = car.aero_mode(radius)
 
-        v_apex = self._cornering_speeds(kappa, gradient, w)
-        a_max, a_min = self._acceleration_limits(kappa, gradient, w)
+        v_apex = self._cornering_speeds(kappa, gradient, w, kappa_v=kappa_v)
+        a_max, a_min = self._acceleration_limits(kappa, gradient, w, kappa_v)
         print(f"   Apex speeds: {v_apex.min():.1f} - {v_apex.max():.1f} m/s")
 
         # Forward pass: accelerate as hard as possible
@@ -101,7 +109,7 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         deploy = np.array([float(deploy_power_limit(x, self.vehicle.ers)) for x in np.ravel(v)]).reshape(np.shape(v))
         return veh.pow_max_ice + deploy
 
-    def _cornering_speeds(self, kappa, gradient, w, hold: bool = False):
+    def _cornering_speeds(self, kappa, gradient, w, hold: bool = False, kappa_v=0.0):
         """
         Highest speed at each point that the tyres allow.
 
@@ -113,8 +121,8 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         car = self.vehicle.car
 
         def ok(v):
-            a_x = 0.0 if hold else -car.resistance(v, kappa, gradient, w) / car.mass
-            return car.is_feasible(v, kappa, gradient, w, a_x, np.inf)
+            a_x = 0.0 if hold else -car.resistance(v, kappa, gradient, w, kappa_v) / car.mass
+            return car.is_feasible(v, kappa, gradient, w, a_x, np.inf, kappa_v=kappa_v)
 
         lo = np.full(len(kappa), V_MIN)
         hi = np.full(len(kappa), V_MAX)
@@ -126,7 +134,7 @@ class ForwardBackwardSolver(VelocityProfileSolver):
             hi = np.where(mid_ok, hi, mid)
         return np.where(flat_out, V_MAX, lo)
 
-    def _acceleration_limits(self, kappa, gradient, w):
+    def _acceleration_limits(self, kappa, gradient, w, kappa_v=None):
         """
         Highest and lowest feasible acceleration at each point, tabulated over V_GRID: arrays of shape (N, len(V_GRID)).
 
@@ -135,13 +143,14 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         """
         car = self.vehicle.car
         v = V_GRID[None, :]
-        kappa, gradient, w = kappa[:, None], gradient[:, None], w[:, None]
+        kappa_v = np.zeros_like(kappa) if kappa_v is None else np.asarray(kappa_v, dtype=float)
+        kappa, gradient, w, kappa_v = kappa[:, None], gradient[:, None], w[:, None], kappa_v[:, None]
         p_max = self._max_power(V_GRID)[None, :]
 
         def ok(a):
-            return car.is_feasible(v, kappa, gradient, w, a, p_max)
+            return car.is_feasible(v, kappa, gradient, w, a, p_max, kappa_v=kappa_v)
 
-        resistance = car.resistance(v, kappa, gradient, w)
+        resistance = car.resistance(v, kappa, gradient, w, kappa_v)
         a_power = (p_max / v - resistance) / car.mass                                 # Full power, if grip allows
         a_brakes = -(car.vehicle.max_brake_force + resistance) / car.mass              # Full brakes, if grip allows
         a_coast = np.broadcast_to(-resistance / car.mass, a_power.shape)

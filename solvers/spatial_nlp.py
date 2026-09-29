@@ -241,12 +241,15 @@ class SpatialNLPSolver(BaseSolver):
         return np.interp(self.s_grid, np.linspace(0, self.track.total_length, len(values)), values)
 
     def _track_on_grid(self):
-        """Curvature (1/m), gradient (rad) and aero mode at the NLP nodes of one lap."""
-        radius = self._sample_on_grid(self.track.track_data.radius)
-        gradient = self._sample_on_grid(self.track.track_data.gradient)
-        return 1.0 / np.abs(radius), gradient, self.car.aero_mode(radius)
+        """Curvature (1/m), gradient (rad), aero mode and vertical curvature (1/m) at the NLP nodes of one lap."""
+        td = self.track.track_data
+        radius = self._sample_on_grid(td.radius)
+        gradient = self._sample_on_grid(td.gradient)
+        kappa_v = getattr(td, "vertical_curvature", None)
+        kappa_v = np.zeros_like(gradient) if kappa_v is None else self._sample_on_grid(kappa_v)
+        return 1.0 / np.abs(radius), gradient, self.car.aero_mode(radius), kappa_v
 
-    def _point_dynamics(self, opti, x, u, kappa, gradient, w, grip_scale, tire, add_constraints):
+    def _point_dynamics(self, opti, x, u, kappa, gradient, kappa_v, w, grip_scale, tire, add_constraints):
         """
         State derivatives d/ds at one collocation point, keyed like the states.
 
@@ -265,7 +268,7 @@ class SpatialNLPSolver(BaseSolver):
             grip_front = mu_scale_ca(x["TCF"], x["WF"], tire.thermal, tire.compound)
             grip_rear = mu_scale_ca(x["TCR"], x["WR"], tire.thermal, tire.compound)
 
-        f = car.point(v, kappa, gradient, w, drive, brake_front, brake_rear, grip_front, grip_rear)
+        f = car.point(v, kappa, gradient, w, drive, brake_front, brake_rear, grip_front, grip_rear, kappa_v)
         if add_constraints:
             opti.subject_to(f.usage_front <= 1.0)
             opti.subject_to(f.usage_rear <= 1.0)
@@ -338,10 +341,10 @@ class SpatialNLPSolver(BaseSolver):
         line = [r + lap * self.N for lap in range(n_laps + 1)]  # Nodes on the timing line
 
         # Track data and grip scale at every node; run-up nodes lie at the end of the lap
-        kappa_arr, gradient_arr, w_arr = self._track_on_grid()
+        kappa_arr, gradient_arr, w_arr, kappa_v_arr = self._track_on_grid()
         node = np.arange(n + 1)
         k_node = np.where(node < r, self.N - r + node, (node - r) % self.N)
-        kappa_n, gradient_n, w_n = kappa_arr[k_node], gradient_arr[k_node], w_arr[k_node]
+        kappa_n, gradient_n, w_n, kappa_v_n = kappa_arr[k_node], gradient_arr[k_node], w_arr[k_node], kappa_v_arr[k_node]
         grip_n = np.asarray(lap_grip_scales, dtype=float)[np.clip((node - r) // self.N, 0, n_laps - 1)]
 
         # =================================================================
@@ -411,7 +414,7 @@ class SpatialNLPSolver(BaseSolver):
         for j in range(n + 1):
             f_nodes.append(self._point_dynamics(
                 opti, {name: x[j] for name, x in X.items()}, physical(U, j),
-                kappa_n[j], gradient_n[j], W[j], float(grip_n[j]), tire, add_constraints=True,
+                kappa_n[j], gradient_n[j], kappa_v_n[j], W[j], float(grip_n[j]), tire, add_constraints=True,
             ))
             power_rules(U, j, V[j])
 
@@ -459,6 +462,7 @@ class SpatialNLPSolver(BaseSolver):
                     opti, {name: x[i] for name, x in X_MID.items()}, physical(U_MID, i),
                     0.5 * (kappa_n[i] + kappa_n[i + 1]),
                     0.5 * (gradient_n[i] + gradient_n[i + 1]),
+                    0.5 * (kappa_v_n[i] + kappa_v_n[i + 1]),
                     0.5 * (W[i] + W[i + 1]),
                     float(grip_n[i]), tire, add_constraints=True,
                 )
@@ -618,7 +622,7 @@ class SpatialNLPSolver(BaseSolver):
         # Initial guess (SOL-8): the guessed speed profile with ERS off, which the car model can drive,
         # with the throttle and brakes it needs; tyres warm and wearing slowly
         v_nodes = np.concatenate([v_guess[self.N - r:self.N]] + [v_guess[:-1]] * n_laps + [v_guess[-1:]])
-        interval_guess = dict(zip(("THROTTLE", "BRAKE_F", "BRAKE_R"), self._controls_for(v_nodes, kappa_n, gradient_n, w_n)))
+        interval_guess = dict(zip(("THROTTLE", "BRAKE_F", "BRAKE_R"), self._controls_for(v_nodes, kappa_n, gradient_n, w_n, kappa_v_n)))
         soc_guess = ers.max_soc if ers.qualifying else np.clip(initial_soc, ers.min_soc, ers.max_soc)
         guesses = {"V": v_nodes, "SOC": np.full(n + 1, soc_guess)}
         if tire is not None:
@@ -658,14 +662,14 @@ class SpatialNLPSolver(BaseSolver):
         status = _SUCCESS_STATUS.get(return_status, return_status)
         return self._extract_trajectory(sol, variables, status, n_laps, lap_grip_scales, tire)
 
-    def _controls_for(self, v_nodes, kappa_n, gradient_n, w_n):
+    def _controls_for(self, v_nodes, kappa_n, gradient_n, w_n, kappa_v_n):
         """Throttle and brakes (fractions) that drive the speed profile v_nodes with ERS off, per interval."""
         car = self.car
         veh = self.vehicle.vehicle
         v_mid = 0.5 * (v_nodes[1:] + v_nodes[:-1])
         a_x = (v_nodes[1:] ** 2 - v_nodes[:-1] ** 2) / (2.0 * self.ds)
         w_mid = 0.5 * (w_n[:-1] + w_n[1:])
-        needed = car.mass * a_x + car.resistance(v_mid, kappa_n[:-1], gradient_n[:-1], w_mid)
+        needed = car.mass * a_x + car.resistance(v_mid, kappa_n[:-1], gradient_n[:-1], w_mid, kappa_v_n[:-1])
         throttle = np.clip(needed * v_mid / veh.pow_max_ice, 0.0, 1.0)
         brake = np.clip(-needed / veh.max_brake_force, 0.0, 1.0)
         return throttle, veh.brake_balance_front * brake, (1.0 - veh.brake_balance_front) * brake
@@ -709,13 +713,13 @@ class SpatialNLPSolver(BaseSolver):
     def _node_forces(self, v, controls, grip_scales):
         """Car-model forces at the nodes (NumPy), from the node controls in physical units."""
         car = self.car
-        kappa_arr, gradient_arr, w_arr = self._track_on_grid()
+        kappa_arr, gradient_arr, w_arr, kappa_v_arr = self._track_on_grid()
         n = len(v) - 1
         k = np.where(np.arange(n + 1) < n, np.arange(n + 1) % self.N, self.N)
         drive = car.drive_force(v, controls["throttle"], controls["P_deploy"], controls["P_harvest"])
         return car.point(
             v, kappa_arr[k], gradient_arr[k], controls["aero_mode"], drive,
-            controls["brake_front"], controls["brake_rear"], grip_scales, grip_scales,
+            controls["brake_front"], controls["brake_rear"], grip_scales, grip_scales, kappa_v_arr[k],
         )
 
     def _extract_trajectory(self, sol, variables, status, n_laps, lap_grip_scales, tire=None):
@@ -847,7 +851,7 @@ class SpatialNLPSolver(BaseSolver):
         car = self.car
         F_BRAKE = self.vehicle.vehicle.max_brake_force
         method = self.collocation_method
-        kappa_arr, gradient_arr, w_arr = self._track_on_grid()
+        kappa_arr, gradient_arr, w_arr, kappa_v_arr = self._track_on_grid()
         node, mid = trajectory.node_controls, trajectory.node_controls["mid"]
         names = ("P_deploy", "P_harvest", "throttle", "brake_front", "brake_rear")
         n = len(trajectory.v_opt) - 1
@@ -870,12 +874,12 @@ class SpatialNLPSolver(BaseSolver):
 
         def forces(i, v, frac):
             k = i % self.N
-            kappa, gradient = [(1.0 - frac) * a[k] + frac * a[k + 1] for a in (kappa_arr, gradient_arr)]
+            kappa, gradient, kappa_v = [(1.0 - frac) * a[k] + frac * a[k + 1] for a in (kappa_arr, gradient_arr, kappa_v_arr)]
             w = (1.0 - frac) * node["aero_mode"][i] + frac * node["aero_mode"][i + 1]
             p_deploy, p_harvest, throttle, brake_front, brake_rear = controls(i, frac)
             drive = car.drive_force(v, throttle, p_deploy, p_harvest)
             scale = scales[i // self.N]
-            return car.point(v, kappa, gradient, w, drive, brake_front, brake_rear, scale, scale)
+            return car.point(v, kappa, gradient, w, drive, brake_front, brake_rear, scale, scale, kappa_v)
 
         v = float(trajectory.v_opt[0])
         s_fine, v_fine = [0.0], [v]

@@ -1,19 +1,20 @@
 """
 Supports:
-1. FastF1 telemetry (GPS-derived curvature)
+1. FastF1 telemetry: a geometry fitted to every clean lap of a session (models/telemetry.py)
 2. TUMFTM minimum curvature racelines
-3. Manual track definitions
+3. A fitted TrackGeometry (models/geometry.py)
 """
 import numpy as np
 import pandas as pd
-import fastf1 as ff1
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
-from scipy.signal import savgol_filter
+from typing import List, Optional
+
 from scipy.interpolate import interp1d, UnivariateSpline
 
 from models.car import air_density
+from models.telemetry import load_session, session_geometry
 
 @dataclass
 class TrackSegment:
@@ -26,6 +27,7 @@ class TrackSegment:
     x: float = 0.0             # GPS X coordinate
     y: float = 0.0             # GPS Y coordinate
     sector: int = 1            # Track sector (1, 2, or 3)
+    vertical_curvature: float = 0.0  # d(gradient)/ds (1/m): positive in a dip, negative over a crest
     
     @property
     def is_straight(self) -> bool:
@@ -55,6 +57,7 @@ class TrackData:
     sector: np.ndarray
     is_braking_zone: np.ndarray
     is_acceleration_zone: np.ndarray
+    vertical_curvature: Optional[np.ndarray] = None   # d(gradient)/ds (1/m); None on flat loaders
 
 
 def find_tumftm_raceline(track: str, directory: str | Path = "data/racelines") -> Optional[Path]:
@@ -153,12 +156,57 @@ class F1TrackModel:
         print(f"   ✓ Loaded {n_points} points, {self.total_length:.0f}m total")
         return self
         
-    def load_from_fastf1(self, driver: Optional[str] = None):
-        """Load track data from FastF1 API's telemetry"""
-        
-        ff1.Cache.enable_cache('./data/cache')
-        session = ff1.get_session(self.year, self.gp, self.session_type)
-        session.load()
+    def load_from_geometry(self, geometry):
+        """
+        Load a track from a fitted TrackGeometry (models/geometry.py): the driven line with its curvature and
+        gradient, resampled at ds by averaging over each step so that short curvature peaks are kept.
+        """
+        print(f"   Loading fitted geometry ({geometry.source or 'unnamed'})...")
+        self.total_length = geometry.length
+        s_uniform = np.arange(0, self.total_length, self.ds)
+        n_points = len(s_uniform)
+
+        def cell_mean(values):
+            # Mean over [s - ds/2, s + ds/2] via the periodic running integral on the fine grid
+            closed_s = np.append(geometry.s, geometry.length)
+            closed_v = np.append(values, values[0])
+            integral = np.concatenate([[0.0], np.cumsum(0.5 * (closed_v[1:] + closed_v[:-1]) * np.diff(closed_s))])
+            total = integral[-1]
+
+            def running(x):
+                laps, rest = np.divmod(x, geometry.length)
+                return laps * total + np.interp(rest, closed_s, integral)
+
+            return (running(s_uniform + 0.5 * self.ds) - running(s_uniform - 0.5 * self.ds)) / self.ds
+
+        curvature = cell_mean(geometry.kappa)
+        radius = np.clip(1.0 / (np.abs(curvature) + 1e-6), 10, 10000)
+        gradient = cell_mean(geometry.gradient)
+        vertical_curvature = cell_mean(geometry.kappa_v)
+        x = np.interp(s_uniform, geometry.s, geometry.x)
+        y = np.interp(s_uniform, geometry.s, geometry.y)
+
+        self.segments = [
+            TrackSegment(
+                distance=s_uniform[i], length=self.ds, radius=radius[i], curvature=curvature[i],
+                gradient=gradient[i], x=x[i], y=y[i], sector=self._get_sector(s_uniform[i]),
+                vertical_curvature=vertical_curvature[i],
+            )
+            for i in range(n_points)
+        ]
+        self._create_track_arrays()
+        self.data_source = 'geometry'
+        print(f"   ✓ Loaded {n_points} points, {self.total_length:.0f}m total")
+        return self
+
+    def load_from_fastf1(self, driver: Optional[str] = None, refresh: bool = False):
+        """
+        Load the track from FastF1: a geometry fitted to every clean lap of the session (models/telemetry.py),
+        so that it doesn't depend on the lap being predicted. The fastest lap (or the driver's) is kept in
+        telemetry_data for plots and comparisons.
+        """
+        session, round_number, location = load_session(self.year, self.gp, self.session_type)
+        print(f"   {self.year} round {round_number}: {session.event['EventName']} ({location}), session {self.session_type}")
 
         weather = getattr(session, 'weather_data', None)
         if weather is not None and len(weather) > 0:
@@ -167,111 +215,16 @@ class F1TrackModel:
                 float(weather['Pressure'].median()),
                 float(weather['Humidity'].median()),
             )
-        
-        if driver:
-            lap = session.laps.pick_driver(driver).pick_fastest()
-        else:
-            lap = session.laps.pick_fastest()
-            
-        telemetry = lap.get_telemetry()
-        self.telemetry_data = telemetry  # Store for visualization
-        
-        # Extract data
-        x = telemetry['X'].values
-        y = telemetry['Y'].values
-        distances = telemetry['Distance'].values
-        speeds = telemetry['Speed'].values
-        
-        # Clean NaNs
-        valid = ~(np.isnan(x) | np.isnan(y) | np.isnan(distances))
-        x, y, distances = x[valid], y[valid], distances[valid]
-        speeds = speeds[valid] if len(speeds) == len(valid) else speeds[~np.isnan(speeds)]
-        
-        self.total_length = distances[-1]
-        
-        # Compute curvature with smoothing
-        curvature = self._compute_curvature_smoothed(x, y, distances, speeds)
-        radius = 1.0 / (np.abs(curvature) + 1e-6)
-        radius = np.clip(radius, 10, 10000)
-        
-        # Resample to uniform ds
-        s_uniform = np.arange(0, self.total_length, self.ds)
-        n_points = len(s_uniform)
-        
-        x_interp = np.interp(s_uniform, distances, x)
-        y_interp = np.interp(s_uniform, distances, y)
-        radius_interp = np.interp(s_uniform, distances, radius)
-        curvature_interp = np.interp(s_uniform, distances, curvature)
-        
-        # Build segments
-        self.segments = []
-        for i in range(n_points):
-            segment = TrackSegment(
-                distance=s_uniform[i],
-                length=self.ds,
-                radius=radius_interp[i],
-                curvature=curvature_interp[i],
-                gradient=0.0,
-                x=x_interp[i],
-                y=y_interp[i],
-                sector=self._get_sector(s_uniform[i]),
-            )
-            self.segments.append(segment)
-        
-        self._create_track_arrays()
+
+        laps = session.laps.pick_drivers(driver) if driver else session.laps
+        lap = laps.pick_fastest()
+        self.telemetry_data = lap.get_telemetry()
+
+        geometry = session_geometry(self.year, self.gp, self.session_type, refresh=refresh, loaded_session=session)
+        self.load_from_geometry(geometry)
         self.data_source = 'fastf1'
-        
-        print(f"   ✓ Loaded {n_points} points from FastF1")
         return self, lap['Driver']
 
-    def _compute_curvature_smoothed(self, 
-                                    x: np.ndarray, 
-                                    y: np.ndarray, 
-                                    distances: np.ndarray, 
-                                    speeds: np.ndarray
-                                ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Compute curvature using hybrid method (GPS geometry + speed limits) -> physics basically
-        """
-        # Smooth coordinates
-        window = min(15, len(x) // 10)
-        if window % 2 == 0:
-            window += 1
-        window = max(window, 5)
-        
-        x_smooth = savgol_filter(x, window, 3)
-        y_smooth = savgol_filter(y, window, 3)
-        
-        # Compute curvature from heading changes
-        dx = np.gradient(x_smooth)
-        dy = np.gradient(y_smooth)
-        heading = np.arctan2(dy, dx)
-        heading = np.unwrap(heading)
-        
-        ds = np.gradient(distances)
-        ds = np.maximum(ds, 0.1)
-        
-        d_heading = np.gradient(heading)
-        curvature_gps = d_heading / ds
-        
-        # Smooth curvature
-        curvature_gps = savgol_filter(curvature_gps, window, 3)
-        
-        # Physics-based bound from speed
-        # v²/R = a_lat -> R = v²/a_lat -> κ = a_lat/v²
-        # gonna assume max 4G lateral cause sometimes in life... you just gotta pick a number
-        g = 9.81
-        a_lat_max = 4.0 * g
-        speeds_ms = speeds / 3.6 if np.mean(speeds) > 50 else speeds
-        speeds_ms = np.maximum(speeds_ms, 10)
-        
-        kappa_physics_max = a_lat_max / speeds_ms**2
-        
-        # bound GPS curvature by physics
-        curvature = np.sign(curvature_gps) * np.minimum(np.abs(curvature_gps), kappa_physics_max)
-        
-        return curvature
-    
     def _compute_curvature_spline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
         cleaner than finite differences
@@ -330,6 +283,7 @@ class F1TrackModel:
         x = np.array([seg.x for seg in self.segments])
         y = np.array([seg.y for seg in self.segments])
         sector = np.array([seg.sector for seg in self.segments])
+        vertical_curvature = np.array([seg.vertical_curvature for seg in self.segments])
         
         # Identify braking/acceleration zones
         is_braking = np.zeros(n, dtype=bool)
@@ -363,6 +317,7 @@ class F1TrackModel:
             sector=sector,
             is_braking_zone=is_braking,
             is_acceleration_zone=is_accel,
+            vertical_curvature=vertical_curvature,
         )
     
     def get_interpolators(self) -> dict:
