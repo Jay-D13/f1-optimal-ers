@@ -7,28 +7,26 @@ export default {
   ],
   theme: {
     extend: {
+      // Race Programme theme: every colour is a CSS variable from index.css, so light and dark share one set of names
       colors: {
-        f1: {
-          red: '#FF1801',
-          black: '#15151E',
-          white: '#F1F2F3',
-          blue: '#0090D0',
-        },
-        retro: {
-          bg: 'var(--retro-bg)',
-          text: 'var(--retro-text)',
-          border: 'var(--retro-border)',
-        },
-        panel: {
-          bg: 'var(--panel-bg)',
-          muted: 'var(--panel-muted)',
-          border: 'var(--panel-border)',
-        }
+        paper: 'var(--paper)',
+        surface: 'var(--surface)',
+        ink: 'var(--ink)',
+        mute: 'var(--mute)',
+        rule: 'var(--rule)',
+        accent: 'var(--accent)',
+        'on-accent': 'var(--on-accent)',
+        model: 'var(--model)',
+        pole: 'var(--pole)',
+        deploy: 'var(--deploy)',
+        harvest: 'var(--harvest)',
+        sel: 'var(--sel)',
       },
       fontFamily: {
-        mono: ['"Space Mono"', 'monospace'],
-        sans: ['"IBM Plex Sans"', 'Inter', 'sans-serif'],
-      }
+        display: ['"Big Shoulders Display"', 'sans-serif'],
+        num: ['"Courier Prime"', 'monospace'],
+        sans: ['"Work Sans"', 'sans-serif'],
+      },
     },
   },
   plugins: [],

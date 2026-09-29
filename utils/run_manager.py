@@ -93,6 +93,9 @@ def export_results(
         'metadata': {
             'track': args.track,
             'year': args.year,
+            'regulations': getattr(args, 'regulations', None),
+            'session': getattr(args, 'session', None),
+            'event': getattr(args, 'event', None),
             'driver': args.driver,
             'timestamp': datetime.now().isoformat(),
             'solver': args.solver,
@@ -117,6 +120,7 @@ def export_results(
             'total_length': float(track.total_length),
             'n_segments': len(track.segments),
             'ds': float(track.ds),
+            'straight_mode_zones': [[float(a), float(b)] for a, b in (getattr(track, 'straight_mode_zones', None) or [])],
         },
         'performance': {
             'lap_time': float(optimal_trajectory.lap_time),

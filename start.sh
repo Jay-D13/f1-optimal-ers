@@ -23,14 +23,14 @@ echo "   Frontend Port: $FRONTEND_PORT"
 
 # Start Backend
 echo "📡 Starting Backend (FastAPI)..."
-uv run uvicorn backend.server:app --reload --host 0.0.0.0 --port $BACKEND_PORT &
+uv run uvicorn backend.server:app --reload --reload-dir backend --host 127.0.0.1 --port $BACKEND_PORT &
 BACKEND_PID=$!
 
 # Start Frontend
 echo "🎨 Starting Frontend (Vite)..."
 cd frontend
 # Pass port to Vite 
-npm run dev -- --port $FRONTEND_PORT &
+VITE_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- --port $FRONTEND_PORT &
 FRONTEND_PID=$!
 
 echo "✅ System Online."

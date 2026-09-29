@@ -424,6 +424,8 @@ def main(args):
     # Save numpy arrays for detailed analysis
     run_manager.save_numpy(optimal_trajectory.s, 'distance')
     run_manager.save_numpy(optimal_trajectory.t_opt, 'time')
+    run_manager.save_numpy(track.track_data.x, 'x')
+    run_manager.save_numpy(track.track_data.y, 'y')
     run_manager.save_numpy(optimal_trajectory.v_opt, 'velocity_optimal')
     run_manager.save_numpy(velocity_profile_no_ers.v, 'velocity_no_ers')
     run_manager.save_numpy(velocity_profile_with_ers.v, 'velocity_with_ers')

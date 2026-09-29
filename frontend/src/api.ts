@@ -1,110 +1,142 @@
-const API_URL = 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
-export interface TrackPoint {
-    x: number;
-    y: number;
-    w_left: number;
-    w_right: number;
+export type Regulations = '2025' | '2026';
+export type Session = 'qualifying' | 'race';
+
+export interface Pole {
+    driver: string;
+    team: string;
+    time: number;
 }
 
-export interface RacelinePoint {
-    x: number;
-    y: number;
-}
-
-export interface SimulationParams {
+export interface RunInfo {
+    run_id: string;
     track: string;
-    year?: number;
+    timestamp: string | null;
+    regulations: Regulations | null;
+    session: Session | null;
+    n_laps: number | null;
+    lap_time: number | null;
+    solver_status: string | null;
+    solve_time: number | null;
+    recovered_mj: number | null;
+    delta_to_pole: number | null;
+}
+
+export interface Round {
+    round: number;
+    name: string;
+    circuit: string;
+    track: string;
+    has_raceline: boolean;
+    quali_cap_mj: number;
+    race_cap_mj: number;
+    superclip_kw: number;
+    ramp_kw_s: number;
+    power_limited_m: number;
+    verified: boolean;
+    straight_mode_zones: { corner: string; offset_m: number }[];
+    pole: Pole | null;
+    latest_run: RunInfo | null;
+}
+
+export interface RunSeries {
+    s: number[];
+    t: number[] | null;
+    v: number[];
+    soc: number[] | null;
+    power: number[] | null;
+    throttle: number[] | null;
+    brake: number[] | null;
+    x: number[] | null;
+    y: number[] | null;
+}
+
+export interface PoleTrace {
+    driver: string;
+    lap_time: number;
+    s: number[];
+    v: number[];
+}
+
+export interface RunDetail {
+    info: RunInfo;
+    summary: {
+        track_info?: { total_length?: number };
+        energy?: { total_deployed_MJ?: number; total_recovered_MJ?: number };
+        velocity_stats?: { max_speed_kmh?: number };
+    };
+    series: RunSeries;
+    straight_mode_zones: [number, number][];
+    pole_trace: PoleTrace | null;
+}
+
+export interface RunSettings {
+    regulations: Regulations;
+    session: Session;
     laps: number;
-    regulations: '2025' | '2026';
-    session: 'qualifying' | 'race';
-    event?: string;
-    initial_soc: number;
-    final_soc_min: number;
-    per_lap_final_soc_min?: number;
-    flying_lap: boolean;
-    enable_tire_degradation: boolean;
-    tire_wear_rate_per_lap: number;
-    tire_min_grip_scale: number;
-    tire_model: 'scalar' | 'dynamic';
-    tire_compound: 'soft' | 'medium' | 'hard';
-    ambient_temp_c: number;
-    track_temp_c: number;
-    tire_init_temp_c: number;
     ds: number;
     collocation: 'euler' | 'trapezoidal' | 'hermite_simpson';
     nlp_solver: 'auto' | 'ipopt' | 'fatrop' | 'sqpmethod';
-    ipopt_linear_solver: string;
     ipopt_hessian: 'limited-memory' | 'exact';
-    use_tumftm: boolean;
-    driver?: string;
+    initial_soc: number;
+    final_soc_min: number;
+    tire_model: 'scalar' | 'dynamic';
+    tire_compound: 'soft' | 'medium' | 'hard';
 }
 
-export interface FastF1Event {
-    name: string;
-    location: string;
-    round: number;
-    country: string;
-    official_name: string;
-}
+export const DEFAULT_SETTINGS: RunSettings = {
+    regulations: '2026',
+    session: 'qualifying',
+    laps: 1,
+    ds: 5,
+    collocation: 'trapezoidal',
+    nlp_solver: 'auto',
+    ipopt_hessian: 'exact',
+    initial_soc: 0.5,
+    final_soc_min: 0.3,
+    tire_model: 'scalar',
+    tire_compound: 'medium',
+};
 
-export interface FastF1Driver {
+export interface Job {
     id: string;
-    code: string;
-    team: string;
+    round: number;
+    track: string;
+    request: RunSettings & { round: number };
+    status: 'running' | 'done' | 'failed' | 'cancelled';
+    started: string;
+    finished: string | null;
+    run_id: string | null;
+    log: string[];
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+    const res = await fetch(`${API_URL}${path}`, init);
+    if (!res.ok) {
+        let detail = res.statusText;
+        try {
+            detail = (await res.json()).detail ?? detail;
+        } catch {
+            // Not JSON
+        }
+        throw new Error(detail);
+    }
+    return res.json() as Promise<T>;
 }
 
 export const api = {
-    getTracks: async () => {
-        const res = await fetch(`${API_URL}/tracks`);
-        const data = await res.json();
-        return data.tracks as string[];
-    },
-
-    getTrackData: async (trackId: string) => {
-        const res = await fetch(`${API_URL}/track/${trackId}`);
-        const data = await res.json();
-        return data.track_data as TrackPoint[];
-    },
-
-    getRaceline: async (trackId: string, type: 'tumftm' | 'fastf1' = 'tumftm') => {
-        const res = await fetch(`${API_URL}/raceline/${trackId}?type=${type}`);
-        const data = await res.json();
-        return data.raceline as RacelinePoint[] | null;
-    },
-
-    runSimulation: async (params: SimulationParams) => {
-        const res = await fetch(`${API_URL}/simulation`, {
+    season: () => request<{ rounds: Round[] }>('/season').then((d) => d.rounds),
+    roundRuns: (round: number) => request<{ runs: RunInfo[] }>(`/rounds/${round}/runs`).then((d) => d.runs),
+    raceline: (round: number) => request<{ x: number[] | null; y: number[] | null }>(`/rounds/${round}/raceline`),
+    run: (track: string, runId: string, round: number) =>
+        request<RunDetail>(`/runs/${encodeURIComponent(track)}/${encodeURIComponent(runId)}?round=${round}`),
+    jobs: () => request<{ jobs: Job[] }>('/jobs').then((d) => d.jobs),
+    startJob: (round: number, settings: RunSettings) =>
+        request<Job>('/jobs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(params)
-        });
-        return await res.json();
-    },
-
-    getFastF1Years: async () => {
-        const res = await fetch(`${API_URL}/fastf1/years`);
-        const data = await res.json();
-        return data.years as number[];
-    },
-
-    getFastF1Tracks: async (year: number) => {
-        const res = await fetch(`${API_URL}/fastf1/tracks/${year}`);
-        const data = await res.json();
-        return data.tracks as FastF1Event[];
-    },
-
-    getFastF1Drivers: async (year: number, location: string) => {
-        const res = await fetch(`${API_URL}/fastf1/drivers/${year}/${location}`);
-        const data = await res.json();
-        return data.drivers as FastF1Driver[];
-    },
-
-    getSimulationData: async (track: string, runId: string) => {
-        const res = await fetch(`${API_URL}/simulation/${track}/${runId}/data`);
-        if (!res.ok) {
-            throw new Error('Failed to fetch simulation data');
-        }
-        return await res.json();
-    }
+            body: JSON.stringify({ round, ...settings }),
+        }),
+    cancelJob: (id: string) => request<{ ok: boolean }>(`/jobs/${id}`, { method: 'DELETE' }),
 };
