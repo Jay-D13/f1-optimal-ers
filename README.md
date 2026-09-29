@@ -343,6 +343,20 @@ track.load_from_fastf1(raceline='data/racelines/monza.csv')                   # 
 - **Cons**: May not match actual F1 racing line (different constraints)
 - **Best for**: Pure optimization studies, comparing strategies
 
+### Calibration (2026 qualifying, work in progress)
+
+`calibration/` fits one set of car parameters (drag and downforce areas, aero balance, Straight Mode drag, tyre grip scale, ICE power) to the 2026 pole laps of the 8 rounds with a current raceline:
+
+```python
+from calibration.dataset import reference_lap          # pole lap on the model's path, cached in data/cache/calibration
+from calibration.fit import Fit, report, print_report
+fit = Fit([2, 5, 9, 10, 13], ["c_w_a", "c_z_a", "mu_scale"])   # train rounds, parameters to fit
+params = fit.run(max_evaluations=15)                   # least squares on the speed trace and lap time
+print_report(report(params, [3, 8, 11]))               # held-out rounds
+```
+
+A round's residuals are the speed error at every measured sample (weighted like 100 samples, 8 km/h scale) and the lap-time error (0.2 s scale). Jacobians are forward differences, with the solves run in parallel. `calibration/plots.py` draws the model and measured speed traces per round. The first fits do not meet the Phase 4 targets yet (held-out lap time median 1.3 %, max 1.7 %), and push parameters to their bounds; see the roadmap.
+
 ### Critical: SOC Boundaries Affect Results Dramatically
 
 The initial and final State of Charge constraints fundamentally change the optimization:
@@ -510,6 +524,7 @@ Net Energy Used:        0.924 MJ
 ```
 f1-ers-optimal-control/
 ├── main.py                 # Entry point
+├── calibration/            # Phase 4: reference laps, parameter fit, diagnostics
 ├── config/
 │   ├── __init__.py
 │   ├── ers.py              # ERS regulations (2025/2026)
