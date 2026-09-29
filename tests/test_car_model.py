@@ -114,7 +114,7 @@ class SharedForcesTests(unittest.TestCase):
     def test_steady_cornering_speed(self):
         # On a circle, the cornering speed holds speed with the rear ellipse at its limit
         fb = ForwardBackwardSolver(self.model, _Track(radius=100.0, length=2 * np.pi * 100.0))
-        v = float(fb._cornering_speeds(np.array([0.01]), np.zeros(1), np.zeros(1))[0])
+        v = float(fb._cornering_speeds(np.array([0.01]), np.zeros(1), np.zeros(1), hold=True)[0])
         resistance = self.car.resistance(v, 0.01, 0.0, 0.0)
         at_limit = self.car.point(v, 0.01, 0.0, 0.0, resistance, 0.0, 0.0)
         self.assertAlmostEqual(float(at_limit.a_x), 0.0, places=9)

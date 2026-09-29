@@ -18,9 +18,9 @@ class ForwardBackwardSolver(VelocityProfileSolver):
     """
     Grip- and power-limited speed profile.
 
-    Every point's speed is capped by the steady cornering speed (holding speed at the grip limit), then a
-    forward pass accelerates as hard as grip and power allow and a backward pass brakes as hard as grip and
-    the brakes allow. Both passes use the car model's per-axle friction ellipses and load transfer.
+    Every point's speed is capped by the highest speed the tyres allow there, then a forward pass
+    accelerates as hard as grip and power allow and a backward pass brakes as hard as grip and the
+    brakes allow. Both passes use the car model's per-axle friction ellipses and load transfer.
     With use_ers_power, the MGU-K adds its deploy limit on top of the ICE, with no energy limit.
     """
 
@@ -101,17 +101,29 @@ class ForwardBackwardSolver(VelocityProfileSolver):
         deploy = np.array([float(deploy_power_limit(x, self.vehicle.ers)) for x in np.ravel(v)]).reshape(np.shape(v))
         return veh.pow_max_ice + deploy
 
-    def _cornering_speeds(self, kappa, gradient, w):
-        """Highest speed at each point at which the car can hold its speed (a_x = 0) within grip."""
+    def _cornering_speeds(self, kappa, gradient, w, hold: bool = False):
+        """
+        Highest speed at each point that the tyres allow.
+
+        By default the car only has to pass the point while coasting, so the tyres carry no longitudinal
+        force. That is what limits it at a curvature peak; in a long corner the forward pass then slows it
+        to the speed it can hold. With hold=True the car must hold its speed there (a_x = 0, the rear tyres
+        also pushing against drag): the steady cornering speed.
+        """
         car = self.vehicle.car
+
+        def ok(v):
+            a_x = 0.0 if hold else -car.resistance(v, kappa, gradient, w) / car.mass
+            return car.is_feasible(v, kappa, gradient, w, a_x, np.inf)
+
         lo = np.full(len(kappa), V_MIN)
         hi = np.full(len(kappa), V_MAX)
-        flat_out = car.is_feasible(hi, kappa, gradient, w, 0.0, np.inf)
+        flat_out = ok(hi)
         for _ in range(_BISECTIONS):
             mid = 0.5 * (lo + hi)
-            ok = car.is_feasible(mid, kappa, gradient, w, 0.0, np.inf)
-            lo = np.where(ok, mid, lo)
-            hi = np.where(ok, hi, mid)
+            mid_ok = ok(mid)
+            lo = np.where(mid_ok, mid, lo)
+            hi = np.where(mid_ok, hi, mid)
         return np.where(flat_out, V_MAX, lo)
 
     def _acceleration_limits(self, kappa, gradient, w):

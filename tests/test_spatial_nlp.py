@@ -144,7 +144,7 @@ class ConstantRadiusTests(unittest.TestCase):
         trajectory = solver.solve()
 
         v_corner = ForwardBackwardSolver(vehicle_model, track)._cornering_speeds(
-            np.array([0.01]), np.zeros(1), np.zeros(1)
+            np.array([0.01]), np.zeros(1), np.zeros(1), hold=True
         )[0]
         np.testing.assert_allclose(trajectory.v_opt, v_corner, rtol=1e-4)
         self.assertAlmostEqual(trajectory.lap_time, track.total_length / v_corner, delta=1e-3)

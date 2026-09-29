@@ -11,6 +11,8 @@ from solvers import (
     ForwardBackwardSolver,
     SpatialNLPSolver,
     MultiLapSpatialNLPSolver,
+    SolverError,
+    VelocityProfile,
 )
 from models import F1TrackModel, VehicleDynamicsModel, find_tumftm_raceline
 from config import (
@@ -87,6 +89,38 @@ def _format_dynamic_tire_summary(trajectory) -> str:
         f"{trajectory.tire_mu_scale_rear[0]:.3f}->{trajectory.tire_mu_scale_rear[-1]:.3f}"
     )
     return "\n".join(lines)
+
+
+def reference_lap(vehicle_config, ers_config, track, args, v_guess, unlimited: bool) -> VelocityProfile:
+    """
+    An optimal single lap to compare the ERS strategy with, from the same NLP: the MGU-K switched off, or
+    (unlimited) at its power limits with no energy limits. Falls back to the forward-backward profile if
+    the solve fails.
+    """
+    if unlimited:
+        ers = replace(ers_config, deployment_limit_per_lap=1e12, recovery_limit_per_lap=1e12, min_soc=-1e6, max_soc=1e6)
+        final_soc_min = -1e6
+    else:
+        ers = replace(ers_config, max_deployment_power=0.0, max_recovery_power=0.0)
+        final_soc_min = min(args.final_soc_min, args.initial_soc)
+    model = VehicleDynamicsModel(vehicle_config, ers)
+    solver = SpatialNLPSolver(
+        model, track, ers, ds=args.ds, collocation_method=args.collocation, nlp_solver=args.nlp_solver,
+        ipopt_linear_solver=args.ipopt_linear_solver, ipopt_hessian_approximation=args.ipopt_hessian,
+    )
+    solver.verbose = False
+    try:
+        traj = solver.solve(v_guess=v_guess, initial_soc=args.initial_soc, final_soc_min=final_soc_min,
+                            is_flying_lap=args.flying_lap)
+    except SolverError as e:
+        print(f"   ⚠ Reference lap failed ({e}); using the forward-backward profile instead")
+        return ForwardBackwardSolver(model, track, use_ers_power=unlimited).solve(flying_lap=args.flying_lap)
+
+    # The NLP nodes line up with the track points (see SpatialNLPSolver.__init__)
+    n = len(track.track_data.s)
+    v = traj.v_opt[:n]
+    a_x = np.append((v[1:] ** 2 - v[:-1] ** 2) / (2.0 * solver.ds), 0.0)
+    return VelocityProfile(s=track.track_data.s, v=v, a_x=a_x, t=traj.t_opt[:n], lap_time=traj.lap_time)
 
 
 def main(args):
@@ -201,20 +235,19 @@ def main(args):
     print("PHASE 1 - VELOCITY PROFILE (Forward-Backward)")
     print("="*70)
     
-    print(f"\n   Computing theoretical profile WITHOUT ERS (Flying: {args.flying_lap})...")
-    fb_solver = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False)
-    velocity_profile_no_ers = fb_solver.solve(flying_lap=args.flying_lap)
+    print(f"\n   Initial guess: forward-backward profile without ERS (Flying: {args.flying_lap})...")
+    fb_profile = ForwardBackwardSolver(vehicle_model, track, use_ers_power=False).solve(flying_lap=args.flying_lap)
 
-    print(f"\n   Computing profile WITH ERS at full power, no energy limit (Flying: {args.flying_lap})...")
-    fb_solver.use_ers_power = True
-    velocity_profile_with_ers = fb_solver.solve(flying_lap=args.flying_lap)
-    
+    print("\n   Reference laps from the same NLP: MGU-K off, and no energy limits...")
+    velocity_profile_no_ers = reference_lap(vehicle_config, ers_config, track, args, fb_profile.v, unlimited=False)
+    velocity_profile_with_ers = reference_lap(vehicle_config, ers_config, track, args, fb_profile.v, unlimited=True)
+
     print(f"\n   Results:")
-    print(f"     No ERS:   {velocity_profile_no_ers.lap_time:.3f}s "
+    print(f"     No ERS:          {velocity_profile_no_ers.lap_time:.3f}s "
           f"(v: {velocity_profile_no_ers.v.min()*3.6:.0f}-{velocity_profile_no_ers.v.max()*3.6:.0f} km/h)")
-    print(f"     With ERS: {velocity_profile_with_ers.lap_time:.3f}s "
+    print(f"     Unlimited energy: {velocity_profile_with_ers.lap_time:.3f}s "
           f"(v: {velocity_profile_with_ers.v.min()*3.6:.0f}-{velocity_profile_with_ers.v.max()*3.6:.0f} km/h)")
-    print(f"     Theoretical improvement: {velocity_profile_no_ers.lap_time - velocity_profile_with_ers.lap_time:.3f}s")
+    print(f"     Forward-backward (initial guess): {fb_profile.lap_time:.3f}s")
 
     lap_grip_scales = None
     if active_tire_model == "scalar" and args.enable_tire_degradation:
@@ -248,7 +281,7 @@ def main(args):
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
         optimal_trajectory = nlp_solver.solve(
-            v_guess=velocity_profile_no_ers.v,
+            v_guess=fb_profile.v,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
             is_flying_lap=args.flying_lap,
@@ -265,7 +298,7 @@ def main(args):
             ipopt_hessian_approximation=args.ipopt_hessian,
         )
         optimal_trajectory = nlp_solver.solve(
-            v_guess=velocity_profile_no_ers.v,
+            v_guess=fb_profile.v,
             n_laps=args.laps,
             initial_soc=args.initial_soc,
             final_soc_min=args.final_soc_min,
@@ -313,12 +346,12 @@ def main(args):
 
         LAP TIME PERFORMANCE:
         Total Time (No ERS):    {total_time_no_ers:.3f} s
-        Total Time (Full ERS, no energy limit): {total_time_with_ers:.3f} s
+        Total Time (No Energy Limits): {total_time_with_ers:.3f} s
         Total Time (Optimal):   {total_time_optimal:.3f} s
         Avg Lap (Optimal):      {total_time_optimal / n_laps:.3f} s
         
         Improvement vs No ERS:  {improvement:.3f} s ({improvement_pct:.2f}%)
-        Gap to Full-ERS Lap:    {gap_to_theoretical:.3f} s (that lap ignores the energy limits)
+        Cost of Energy Limits:  {gap_to_theoretical:.3f} s
 
         SOLVER INFORMATION:
         Status:                 {optimal_trajectory.solver_status}
@@ -334,8 +367,8 @@ def main(args):
         Recovery Efficiency:    {(energy_stats['total_recovered_MJ'] / max(energy_stats['total_deployed_MJ'], 1e-6) * 100):.1f}%
 
         VELOCITY STATISTICS:
-        No ERS Profile:         {velocity_profile_no_ers.v.min()*3.6:.0f} - {velocity_profile_no_ers.v.max()*3.6:.0f} km/h
-        With ERS Profile:       {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
+        No ERS Lap:             {velocity_profile_no_ers.v.min()*3.6:.0f} - {velocity_profile_no_ers.v.max()*3.6:.0f} km/h
+        No Energy Limits Lap:   {velocity_profile_with_ers.v.min()*3.6:.0f} - {velocity_profile_with_ers.v.max()*3.6:.0f} km/h
         Optimal Strategy:       {optimal_trajectory.v_opt.min()*3.6:.0f} - {optimal_trajectory.v_opt.max()*3.6:.0f} km/h (avg: {optimal_trajectory.v_opt.mean()*3.6:.0f} km/h)
 
 {lap_breakdown if lap_breakdown else ""}

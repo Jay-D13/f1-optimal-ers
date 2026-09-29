@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <em>A physics-based optimization framework for computing lap-time-optimal ERS deployment strategies using forward-backward velocity profiling and spatial-domain nonlinear programming.</em>
+  <em>A physics-based optimization framework for computing lap-time-optimal ERS deployment strategies using a spatial-domain nonlinear program with per-axle tyre grip.</em>
 </p>
 
 ---
@@ -37,10 +37,11 @@
 
 ## Overview
 
-This project implements a **two-phase hierarchical optimization** approach for Formula 1 Energy Recovery System (ERS) strategy:
+This project computes lap-time-optimal Formula 1 Energy Recovery System (ERS) strategies on a fixed racing line:
 
-1. **Phase 1 - Velocity Profiling**: A forward-backward solver computes the physics grip limit velocity envelope using vehicle dynamics and track geometry
-2. **Phase 2 - ERS Optimization**: A spatial NLP (Nonlinear Programming) solver finds the optimal battery deployment/recovery strategy to minimize lap time
+1. **Car model** (`models/car.py`): a point mass with per-axle tyre forces (load-sensitive friction ellipses, load transfer, rear-wheel drive), aero drag and downforce, ICE and MGU-K power, and the battery. Every solver uses these same equations.
+2. **Velocity profiling**: a forward-backward pass on the car model gives a quick grip- and power-limited speed profile, used as the optimizer's initial guess and as a no-ERS reference
+3. **ERS optimization**: a spatial NLP (Nonlinear Programming) solver finds the speed, throttle, brake and battery deployment/recovery that minimize lap time, with the tyre grip limits inside the optimization
 
 The framework supports both **2025 regulations** (120kW MGU-K, 4MJ deployment limit) and **upcoming 2026 regulations** (350kW MGU-K, 8.5MJ recovery, no MGU-H).
 
@@ -60,7 +61,7 @@ The ERS system can deploy up to **4MJ per lap** but is limited in how much it ca
 ### Goals Achieved
 
 - **Validated Physics Models** - Implementation aligns with TUMFTM and Oxford academic approaches  
-- **Forward-Backward Solver** - Computes grip-limited velocity profiles within 0.1s of real driver telemetry  
+- **Forward-Backward Solver** - Grip- and power-limited speed profiles on the same car model, for the NLP's initial guess  
 - **Spatial NLP Optimization** - Direct collocation with CasADi/IPOPT for globally optimal ERS deployment (higher order of Gauss-Legendre upgrade in the works)
 - **New Regulation Support** - Compare 2025 vs 2026 powertrain regulations  
 - **Real Telemetry Integration** - Loading actual F1 data via FastF1 API  
@@ -174,7 +175,8 @@ The optimization minimizes **lap time** in the spatial domain:
 minimize    T = ∫(1/v)ds                    (lap time integral)
 
 subject to: 
-    v ≤ v_grip(s)                           (grip-limited velocity from Phase 1)
+    dv/ds = a_x(v, controls, κ(s)) / v      (car model: power, brakes, drag, rolling resistance)
+    (F_x/F_x,max)² + (F_y/F_y,max)² ≤ 1     (friction ellipse on each axle, load-sensitive)
     dSOC/ds = f(P_ers, v, η)                (battery dynamics)
     ∫ P_deploy ds ≤ 4 MJ                    (regulatory deployment limit)
     ∫ P_harvest ds ≤ 2 MJ                   (regulatory recovery limit)
@@ -186,19 +188,20 @@ subject to:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    PHASE 1: Velocity Envelope                │
+│               PHASE 1: Initial guess                         │
 │  ┌─────────────┐    ┌──────────────────┐    ┌────────────┐  │
-│  │ Track Data  │───▶│ Forward-Backward │───▶│ v_max(s)   │  │
-│  │ (curvature) │    │     Solver       │    │ profile    │  │
+│  │ Track Data  │───▶│ Forward-Backward │───▶│ v(s) guess │  │
+│  │ (curvature) │    │ (car model)      │    │ (no ERS)   │  │
 │  └─────────────┘    └──────────────────┘    └────────────┘  │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  PHASE 2: ERS Optimization                   │
+│               PHASE 2: ERS Optimization                      │
 │  ┌─────────────┐    ┌──────────────────┐    ┌────────────┐  │
-│  │ v_max(s)    │───▶│  Spatial NLP     │───▶│ Optimal    │  │
-│  │ + ERS cfg   │    │  (CasADi/IPOPT)  │    │ trajectory │  │
+│  │ v(s) guess  │───▶│  Spatial NLP     │───▶│ Optimal    │  │
+│  │ + car model │    │  (CasADi/IPOPT)  │    │ trajectory │  │
+│  │ + ERS cfg   │    │  grip inside     │    │            │  │
 │  └─────────────┘    └──────────────────┘    └────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -560,7 +563,9 @@ Based on [TUMFTM's laptime-simulation](https://github.com/TUMFTM/laptime-simulat
 
 ### Tire Model
 
-Friction circle with load-dependent coefficients:
+A friction ellipse per axle, (F_x/F_x,max)² + (F_y/F_y,max)² ≤ 1, with load-dependent coefficients per tyre.
+Axle loads include downforce and longitudinal load transfer; the axles share the lateral force by the steady
+yaw balance; traction is on the rear axle only, braking on both:
 
 ```
 μ(Fz) = μ₀ + (dμ/dFz) × (Fz - Fz₀)
