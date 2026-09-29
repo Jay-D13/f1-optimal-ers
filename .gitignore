@@ -5,11 +5,21 @@ build/
 dist/
 wheels/
 *.egg-info
+.*
 
 # Virtual environments
 .venv
-.*
 
 data/cache/
 results/
+
+# macOS Finder metadata
+.DS_Store
+
+# Claude Code worktrees
+.claude/worktrees/
+
+.uv-cache/
+
+# Frontend
 node_modules/

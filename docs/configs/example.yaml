@@ -14,5 +14,5 @@ solver: nlp
 collocation: trapezoidal
 nlp_solver: auto
 ipopt_linear_solver: mumps
-ipopt_hessian: limited-memory
+ipopt_hessian: exact
 regulations: "2025"

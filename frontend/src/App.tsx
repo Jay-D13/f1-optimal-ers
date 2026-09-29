@@ -27,22 +27,16 @@ const DEFAULT_SIM_PARAMS: SimulationParams = {
     enable_tire_degradation: false,
     tire_wear_rate_per_lap: 0.012,
     tire_min_grip_scale: 0.88,
+    tire_model: 'scalar',
+    tire_compound: 'medium',
+    ambient_temp_c: 25.0,
+    track_temp_c: 35.0,
+    tire_init_temp_c: 80.0,
     ds: 5.0,
-    collocation: 'euler',
+    collocation: 'trapezoidal',
     nlp_solver: 'auto',
     ipopt_linear_solver: 'mumps',
-    ipopt_hessian: 'limited-memory',
-    vehicle_mass: undefined,
-    vehicle_c_w_a: undefined,
-    vehicle_c_z_a_f: undefined,
-    vehicle_c_z_a_r: undefined,
-    vehicle_f_roll: undefined,
-    tire_fz_0: undefined,
-    tire_mux_f: undefined,
-    tire_muy_f: undefined,
-    tire_mux_r: undefined,
-    tire_muy_r: undefined,
-    tire_model_exp: undefined,
+    ipopt_hessian: 'exact',
     use_tumftm: true,
     driver: undefined,
 };
@@ -98,8 +92,6 @@ function App() {
         tire: false,
         advanced: false,
     });
-    const [showVehicleOverrides, setShowVehicleOverrides] = useState(false);
-    const [showTireOverrides, setShowTireOverrides] = useState(false);
 
     const lapStartOptions: SegmentedOption<'flying' | 'standing'>[] = [
         { value: 'flying', label: 'Flying Lap', description: 'Continuity at lap boundary' },
@@ -153,13 +145,7 @@ function App() {
         setSimParams((prev) => ({
             ...prev,
             regulations: DEFAULT_SIM_PARAMS.regulations,
-            vehicle_mass: DEFAULT_SIM_PARAMS.vehicle_mass,
-            vehicle_c_w_a: DEFAULT_SIM_PARAMS.vehicle_c_w_a,
-            vehicle_c_z_a_f: DEFAULT_SIM_PARAMS.vehicle_c_z_a_f,
-            vehicle_c_z_a_r: DEFAULT_SIM_PARAMS.vehicle_c_z_a_r,
-            vehicle_f_roll: DEFAULT_SIM_PARAMS.vehicle_f_roll,
         }));
-        setShowVehicleOverrides(false);
     };
 
     const resetTireSection = () => {
@@ -168,14 +154,7 @@ function App() {
             enable_tire_degradation: DEFAULT_SIM_PARAMS.enable_tire_degradation,
             tire_wear_rate_per_lap: DEFAULT_SIM_PARAMS.tire_wear_rate_per_lap,
             tire_min_grip_scale: DEFAULT_SIM_PARAMS.tire_min_grip_scale,
-            tire_fz_0: DEFAULT_SIM_PARAMS.tire_fz_0,
-            tire_mux_f: DEFAULT_SIM_PARAMS.tire_mux_f,
-            tire_muy_f: DEFAULT_SIM_PARAMS.tire_muy_f,
-            tire_mux_r: DEFAULT_SIM_PARAMS.tire_mux_r,
-            tire_muy_r: DEFAULT_SIM_PARAMS.tire_muy_r,
-            tire_model_exp: DEFAULT_SIM_PARAMS.tire_model_exp,
         }));
-        setShowTireOverrides(false);
     };
 
     const resetAdvancedSolverSection = () => {
@@ -216,46 +195,9 @@ function App() {
         if (!Number.isFinite(simParams.tire_min_grip_scale) || simParams.tire_min_grip_scale <= 0 || simParams.tire_min_grip_scale > 1) {
             errors.tire_min_grip_scale = 'Grip floor must be in the interval (0, 1].';
         }
-        if (showVehicleOverrides) {
-            if (simParams.vehicle_mass !== undefined && (!Number.isFinite(simParams.vehicle_mass) || simParams.vehicle_mass <= 0)) {
-                errors.vehicle_mass = 'Vehicle mass must be greater than zero.';
-            }
-            if (simParams.vehicle_c_w_a !== undefined && (!Number.isFinite(simParams.vehicle_c_w_a) || simParams.vehicle_c_w_a <= 0)) {
-                errors.vehicle_c_w_a = 'Cd*A must be greater than zero.';
-            }
-            if (simParams.vehicle_c_z_a_f !== undefined && (!Number.isFinite(simParams.vehicle_c_z_a_f) || simParams.vehicle_c_z_a_f < 0)) {
-                errors.vehicle_c_z_a_f = 'Front downforce term must be >= 0.';
-            }
-            if (simParams.vehicle_c_z_a_r !== undefined && (!Number.isFinite(simParams.vehicle_c_z_a_r) || simParams.vehicle_c_z_a_r < 0)) {
-                errors.vehicle_c_z_a_r = 'Rear downforce term must be >= 0.';
-            }
-            if (simParams.vehicle_f_roll !== undefined && (!Number.isFinite(simParams.vehicle_f_roll) || simParams.vehicle_f_roll < 0)) {
-                errors.vehicle_f_roll = 'Rolling resistance must be >= 0.';
-            }
-        }
-        if (showTireOverrides) {
-            if (simParams.tire_fz_0 !== undefined && (!Number.isFinite(simParams.tire_fz_0) || simParams.tire_fz_0 <= 0)) {
-                errors.tire_fz_0 = 'Nominal load must be greater than zero.';
-            }
-            if (simParams.tire_mux_f !== undefined && (!Number.isFinite(simParams.tire_mux_f) || simParams.tire_mux_f <= 0)) {
-                errors.tire_mux_f = 'Front longitudinal friction must be > 0.';
-            }
-            if (simParams.tire_muy_f !== undefined && (!Number.isFinite(simParams.tire_muy_f) || simParams.tire_muy_f <= 0)) {
-                errors.tire_muy_f = 'Front lateral friction must be > 0.';
-            }
-            if (simParams.tire_mux_r !== undefined && (!Number.isFinite(simParams.tire_mux_r) || simParams.tire_mux_r <= 0)) {
-                errors.tire_mux_r = 'Rear longitudinal friction must be > 0.';
-            }
-            if (simParams.tire_muy_r !== undefined && (!Number.isFinite(simParams.tire_muy_r) || simParams.tire_muy_r <= 0)) {
-                errors.tire_muy_r = 'Rear lateral friction must be > 0.';
-            }
-            if (simParams.tire_model_exp !== undefined && (!Number.isFinite(simParams.tire_model_exp) || simParams.tire_model_exp <= 0)) {
-                errors.tire_model_exp = 'Friction circle exponent must be > 0.';
-            }
-        }
 
         return errors;
-    }, [simParams, showVehicleOverrides, showTireOverrides]);
+    }, [simParams]);
 
     const validationState = useMemo<ValidationState>(() => {
         const errors = Object.values(fieldErrors).filter((error): error is string => Boolean(error));
@@ -267,19 +209,13 @@ function App() {
         if (simParams.nlp_solver === 'ipopt' && simParams.laps > 8) {
             warnings.push('Large horizons with IPOPT may require longer solve times.');
         }
-        if (showVehicleOverrides) {
-            warnings.push('Vehicle overrides replace track/regulation defaults for this run.');
-        }
-        if (showTireOverrides) {
-            warnings.push('Tire model overrides affect grip behavior across all phases.');
-        }
 
         return {
             isValid: errors.length === 0,
             errors,
             warnings,
         };
-    }, [fieldErrors, simParams.enable_tire_degradation, simParams.laps, simParams.nlp_solver, showVehicleOverrides, showTireOverrides]);
+    }, [fieldErrors, simParams.enable_tire_degradation, simParams.laps, simParams.nlp_solver]);
 
     const canRunSimulation = Boolean(selectedTrackName) && !simulating && validationState.isValid;
 
@@ -362,17 +298,6 @@ function App() {
                 year: trackSource === 'fastf1' ? selectedYear : undefined,
                 driver: selectedDriver || undefined,
                 use_tumftm: trackSource === 'local', // Prefer TUMFTM for local, FastF1 for remote
-                vehicle_mass: showVehicleOverrides ? simParams.vehicle_mass : undefined,
-                vehicle_c_w_a: showVehicleOverrides ? simParams.vehicle_c_w_a : undefined,
-                vehicle_c_z_a_f: showVehicleOverrides ? simParams.vehicle_c_z_a_f : undefined,
-                vehicle_c_z_a_r: showVehicleOverrides ? simParams.vehicle_c_z_a_r : undefined,
-                vehicle_f_roll: showVehicleOverrides ? simParams.vehicle_f_roll : undefined,
-                tire_fz_0: showTireOverrides ? simParams.tire_fz_0 : undefined,
-                tire_mux_f: showTireOverrides ? simParams.tire_mux_f : undefined,
-                tire_muy_f: showTireOverrides ? simParams.tire_muy_f : undefined,
-                tire_mux_r: showTireOverrides ? simParams.tire_mux_r : undefined,
-                tire_muy_r: showTireOverrides ? simParams.tire_muy_r : undefined,
-                tire_model_exp: showTireOverrides ? simParams.tire_model_exp : undefined,
             };
 
             const res = await api.runSimulation(params);
@@ -862,65 +787,6 @@ function App() {
                                                             onChange={(next) => setSimParams({ ...simParams, regulations: next })}
                                                         />
                                                     </div>
-                                                    <div className="rounded-lg border border-panel-border bg-panel-muted/40 p-3">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setShowVehicleOverrides((prev) => !prev)}
-                                                            className="flex w-full items-center justify-between font-mono text-xs font-bold uppercase tracking-wide text-retro-text/80"
-                                                        >
-                                                            <span>Vehicle Overrides</span>
-                                                            {showVehicleOverrides ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                                                        </button>
-                                                        {showVehicleOverrides && (
-                                                            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
-                                                                <ConfigInput
-                                                                    meta={{ id: 'vehicle_mass', label: 'Vehicle Mass (kg)', hint: 'Overrides regulation/track mass.', error: fieldErrors.vehicle_mass } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={1}
-                                                                    value={simParams.vehicle_mass ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, vehicle_mass: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, vehicle_mass: undefined })}
-                                                                    min={1}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'vehicle_c_w_a', label: 'Drag Cd*A', hint: 'Combined aerodynamic drag term.', error: fieldErrors.vehicle_c_w_a } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.vehicle_c_w_a ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, vehicle_c_w_a: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, vehicle_c_w_a: undefined })}
-                                                                    min={0.01}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'vehicle_c_z_a_f', label: 'Front Downforce Term', hint: 'Front Cl*A equivalent.', error: fieldErrors.vehicle_c_z_a_f } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.vehicle_c_z_a_f ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, vehicle_c_z_a_f: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, vehicle_c_z_a_f: undefined })}
-                                                                    min={0}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'vehicle_c_z_a_r', label: 'Rear Downforce Term', hint: 'Rear Cl*A equivalent.', error: fieldErrors.vehicle_c_z_a_r } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.vehicle_c_z_a_r ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, vehicle_c_z_a_r: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, vehicle_c_z_a_r: undefined })}
-                                                                    min={0}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'vehicle_f_roll', label: 'Rolling Resistance', hint: 'Global rolling resistance coefficient.', error: fieldErrors.vehicle_f_roll } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.001}
-                                                                    value={simParams.vehicle_f_roll ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, vehicle_f_roll: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, vehicle_f_roll: undefined })}
-                                                                    min={0}
-                                                                />
-                                                            </div>
-                                                        )}
-                                                    </div>
                                                 </div>
                                             )}
                                         </ConfigSectionCard>
@@ -964,74 +830,6 @@ function App() {
                                                         step={0.01}
                                                         disabled={!simParams.enable_tire_degradation}
                                                     />
-                                                    <div className="md:col-span-2 rounded-lg border border-panel-border bg-panel-muted/40 p-3">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setShowTireOverrides((prev) => !prev)}
-                                                            className="flex w-full items-center justify-between font-mono text-xs font-bold uppercase tracking-wide text-retro-text/80"
-                                                        >
-                                                            <span>Tire Model Overrides</span>
-                                                            {showTireOverrides ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                                                        </button>
-                                                        {showTireOverrides && (
-                                                            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
-                                                                <ConfigInput
-                                                                    meta={{ id: 'tire_fz_0', label: 'Nominal Load Fz0 (N)', hint: 'Reference load for tire model scaling.', error: fieldErrors.tire_fz_0 } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={10}
-                                                                    value={simParams.tire_fz_0 ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, tire_fz_0: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, tire_fz_0: undefined })}
-                                                                    min={1}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'tire_model_exp', label: 'Friction Circle Exponent', hint: '2.0 is a pure circle.', error: fieldErrors.tire_model_exp } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.1}
-                                                                    value={simParams.tire_model_exp ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, tire_model_exp: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, tire_model_exp: undefined })}
-                                                                    min={0.1}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'tire_mux_f', label: 'Front mu_x', hint: 'Front longitudinal friction at Fz0.', error: fieldErrors.tire_mux_f } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.tire_mux_f ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, tire_mux_f: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, tire_mux_f: undefined })}
-                                                                    min={0.1}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'tire_muy_f', label: 'Front mu_y', hint: 'Front lateral friction at Fz0.', error: fieldErrors.tire_muy_f } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.tire_muy_f ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, tire_muy_f: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, tire_muy_f: undefined })}
-                                                                    min={0.1}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'tire_mux_r', label: 'Rear mu_x', hint: 'Rear longitudinal friction at Fz0.', error: fieldErrors.tire_mux_r } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.tire_mux_r ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, tire_mux_r: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, tire_mux_r: undefined })}
-                                                                    min={0.1}
-                                                                />
-                                                                <ConfigInput
-                                                                    meta={{ id: 'tire_muy_r', label: 'Rear mu_y', hint: 'Rear lateral friction at Fz0.', error: fieldErrors.tire_muy_r } satisfies FieldMeta}
-                                                                    type="number"
-                                                                    step={0.01}
-                                                                    value={simParams.tire_muy_r ?? ''}
-                                                                    onValueChange={(v) => setSimParams({ ...simParams, tire_muy_r: v === '' ? undefined : Number(v) })}
-                                                                    onClearValue={() => setSimParams({ ...simParams, tire_muy_r: undefined })}
-                                                                    min={0.1}
-                                                                />
-                                                            </div>
-                                                        )}
-                                                    </div>
                                                 </div>
                                             )}
                                         </ConfigSectionCard>
@@ -1119,8 +917,6 @@ function App() {
                                                 <ReadinessRow label="Solver" value={simParams.nlp_solver} />
                                                 <ReadinessRow label="SOC" value={`${(simParams.initial_soc * 100).toFixed(0)}% -> ${(simParams.final_soc_min * 100).toFixed(0)}%`} />
                                                 <ReadinessRow label="Tire Degradation" value={simParams.enable_tire_degradation ? 'Enabled' : 'Disabled'} />
-                                                <ReadinessRow label="Vehicle Overrides" value={showVehicleOverrides ? 'Enabled' : 'Disabled'} />
-                                                <ReadinessRow label="Tire Overrides" value={showTireOverrides ? 'Enabled' : 'Disabled'} />
                                             </div>
                                             <div className="mt-4 rounded-lg border border-panel-border bg-panel-muted/60 p-3">
                                                 <p className={cn(

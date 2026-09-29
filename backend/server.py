@@ -36,25 +36,19 @@ class SimulationRequest(BaseModel):
     final_soc_min: float = Field(default=0.3, ge=0.0, le=1.0)
     per_lap_final_soc_min: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     ds: float = Field(default=5.0, gt=0.0)
-    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
+    collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "trapezoidal"
     nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto"
     flying_lap: bool = True
     enable_tire_degradation: bool = False
     tire_wear_rate_per_lap: float = Field(default=0.012, ge=0.0)
     tire_min_grip_scale: float = Field(default=0.88, gt=0.0, le=1.0)
+    tire_model: Literal["scalar", "dynamic"] = "scalar"
+    tire_compound: Literal["soft", "medium", "hard"] = "medium"
+    ambient_temp_c: float = 25.0
+    track_temp_c: float = 35.0
+    tire_init_temp_c: float = 80.0
     ipopt_linear_solver: str = "mumps"
-    ipopt_hessian: Literal["limited-memory", "exact"] = "limited-memory"
-    vehicle_mass: Optional[float] = Field(default=None, gt=0.0)
-    vehicle_c_w_a: Optional[float] = Field(default=None, gt=0.0)
-    vehicle_c_z_a_f: Optional[float] = Field(default=None, ge=0.0)
-    vehicle_c_z_a_r: Optional[float] = Field(default=None, ge=0.0)
-    vehicle_f_roll: Optional[float] = Field(default=None, ge=0.0)
-    tire_fz_0: Optional[float] = Field(default=None, gt=0.0)
-    tire_mux_f: Optional[float] = Field(default=None, gt=0.0)
-    tire_muy_f: Optional[float] = Field(default=None, gt=0.0)
-    tire_mux_r: Optional[float] = Field(default=None, gt=0.0)
-    tire_muy_r: Optional[float] = Field(default=None, gt=0.0)
-    tire_model_exp: Optional[float] = Field(default=None, gt=0.0)
+    ipopt_hessian: Literal["limited-memory", "exact"] = "exact"
     use_tumftm: bool = False
     driver: Optional[str] = None
 
@@ -75,6 +69,11 @@ def _build_simulation_command(req: SimulationRequest) -> list[str]:
         "--ipopt-hessian", req.ipopt_hessian,
         "--tire-wear-rate-per-lap", str(req.tire_wear_rate_per_lap),
         "--tire-min-grip-scale", str(req.tire_min_grip_scale),
+        "--tire-model", req.tire_model,
+        "--tire-compound", req.tire_compound,
+        "--ambient-temp-c", str(req.ambient_temp_c),
+        "--track-temp-c", str(req.track_temp_c),
+        "--tire-init-temp-c", str(req.tire_init_temp_c),
         "--flying-lap" if req.flying_lap else "--no-flying-lap",
         "--enable-tire-degradation" if req.enable_tire_degradation else "--no-tire-degradation",
     ]
@@ -87,23 +86,6 @@ def _build_simulation_command(req: SimulationRequest) -> list[str]:
 
     if req.driver:
         cmd.extend(["--driver", req.driver])
-
-    optional_overrides: dict[str, float | None] = {
-        "--vehicle-mass": req.vehicle_mass,
-        "--vehicle-c-w-a": req.vehicle_c_w_a,
-        "--vehicle-c-z-a-f": req.vehicle_c_z_a_f,
-        "--vehicle-c-z-a-r": req.vehicle_c_z_a_r,
-        "--vehicle-f-roll": req.vehicle_f_roll,
-        "--tire-fz-0": req.tire_fz_0,
-        "--tire-mux-f": req.tire_mux_f,
-        "--tire-muy-f": req.tire_muy_f,
-        "--tire-mux-r": req.tire_mux_r,
-        "--tire-muy-r": req.tire_muy_r,
-        "--tire-model-exp": req.tire_model_exp,
-    }
-    for flag, value in optional_overrides.items():
-        if value is not None:
-            cmd.extend([flag, str(value)])
 
     return cmd
 

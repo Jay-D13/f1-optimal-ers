@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
 import typer
 import yaml
+from click.core import ParameterSource
 
 
 @dataclass
@@ -19,6 +20,11 @@ class AppConfig:
     laps: int = 1
     per_lap_final_soc_min: float | None = None
     enable_tire_degradation: bool = False
+    tire_model: Literal["scalar", "dynamic"] = "scalar"
+    tire_compound: Literal["soft", "medium", "hard"] = "medium"
+    ambient_temp_c: float = 25.0
+    track_temp_c: float = 35.0
+    tire_init_temp_c: float = 80.0
     tire_wear_rate_per_lap: float = 0.012
     tire_min_grip_scale: float = 0.88
     flying_lap: bool = True
@@ -29,18 +35,7 @@ class AppConfig:
     collocation: Literal["euler", "trapezoidal", "hermite_simpson"] = "euler"
     nlp_solver: Literal["auto", "ipopt", "fatrop", "sqpmethod"] = "auto"
     ipopt_linear_solver: str = "mumps"
-    ipopt_hessian: Literal["limited-memory", "exact"] = "limited-memory"
-    vehicle_mass: float | None = None
-    vehicle_c_w_a: float | None = None
-    vehicle_c_z_a_f: float | None = None
-    vehicle_c_z_a_r: float | None = None
-    vehicle_f_roll: float | None = None
-    tire_fz_0: float | None = None
-    tire_mux_f: float | None = None
-    tire_muy_f: float | None = None
-    tire_mux_r: float | None = None
-    tire_muy_r: float | None = None
-    tire_model_exp: float | None = None
+    ipopt_hessian: Literal["limited-memory", "exact"] = "exact"
     regulations: Literal["2025", "2026"] = "2025"
 
 
@@ -56,6 +51,7 @@ app = typer.Typer(add_completion=False)
 
 @app.command(help="F1 ERS Optimal Control")
 def cli(
+    ctx: typer.Context,
     # ── Track & data ──────────────────────────────────────────────
     track: Annotated[str, typer.Option(help="Grand Prix name (e.g. Monaco, Monza, Spa)")] = "Monaco",
     year: Annotated[int, typer.Option(help="Season year for FastF1 telemetry")] = 2024,
@@ -77,24 +73,18 @@ def cli(
     enable_tire_degradation: Annotated[bool, typer.Option("--enable-tire-degradation/--no-tire-degradation", help="Enable grip loss over laps")] = False,
     tire_wear_rate_per_lap: Annotated[float, typer.Option(help="Grip fraction lost per lap")] = 0.012,
     tire_min_grip_scale: Annotated[float, typer.Option(help="Minimum grip scale floor (0, 1]")] = 0.88,
+    tire_model: Annotated[str, typer.Option(help="Tire model: scalar (per-lap grip scale) or dynamic (temperature and wear states, multi-lap)")] = "scalar",
+    tire_compound: Annotated[str, typer.Option(help="Tire compound for the dynamic model: soft, medium, hard")] = "medium",
+    ambient_temp_c: Annotated[float, typer.Option(help="Air temperature [C] (dynamic tire model)")] = 25.0,
+    track_temp_c: Annotated[float, typer.Option(help="Track temperature [C] (dynamic tire model)")] = 35.0,
+    tire_init_temp_c: Annotated[float, typer.Option(help="Tire temperature at the start [C] (dynamic tire model)")] = 80.0,
 
     # ── Solver ────────────────────────────────────────────────────
     solver: Annotated[str, typer.Option(help="Solver type (nlp)")] = "nlp",
     collocation: Annotated[str, typer.Option(help="Integration: euler, trapezoidal, hermite_simpson")] = "euler",
-    nlp_solver: Annotated[str, typer.Option(help="NLP backend: auto, ipopt, fatrop, sqpmethod")] = "auto",
+    nlp_solver: Annotated[str, typer.Option(help="NLP backend: auto (= ipopt), ipopt, fatrop, sqpmethod")] = "auto",
     ipopt_linear_solver: Annotated[str, typer.Option(help="Ipopt linear solver (e.g. mumps, ma97)")] = "mumps",
-    ipopt_hessian: Annotated[str, typer.Option(help="Ipopt Hessian: limited-memory or exact")] = "limited-memory",
-    vehicle_mass: Annotated[Optional[float], typer.Option(help="Override vehicle mass [kg]")] = None,
-    vehicle_c_w_a: Annotated[Optional[float], typer.Option(help="Override Cd*A drag term [m^2]")] = None,
-    vehicle_c_z_a_f: Annotated[Optional[float], typer.Option(help="Override front downforce term [m^2]")] = None,
-    vehicle_c_z_a_r: Annotated[Optional[float], typer.Option(help="Override rear downforce term [m^2]")] = None,
-    vehicle_f_roll: Annotated[Optional[float], typer.Option(help="Override rolling resistance coefficient")] = None,
-    tire_fz_0: Annotated[Optional[float], typer.Option(help="Override nominal tire load [N]")] = None,
-    tire_mux_f: Annotated[Optional[float], typer.Option(help="Override front longitudinal friction at nominal load")] = None,
-    tire_muy_f: Annotated[Optional[float], typer.Option(help="Override front lateral friction at nominal load")] = None,
-    tire_mux_r: Annotated[Optional[float], typer.Option(help="Override rear longitudinal friction at nominal load")] = None,
-    tire_muy_r: Annotated[Optional[float], typer.Option(help="Override rear lateral friction at nominal load")] = None,
-    tire_model_exp: Annotated[Optional[float], typer.Option(help="Override friction circle exponent")] = None,
+    ipopt_hessian: Annotated[str, typer.Option(help="Ipopt Hessian: exact, or limited-memory (faster but can stop far from the optimum)")] = "exact",
 
     # ── Output ────────────────────────────────────────────────────
     plot: Annotated[bool, typer.Option("--plot/--no-plot", help="Generate visualisation plots")] = True,
@@ -106,9 +96,7 @@ def cli(
     """Entry point — build AppConfig from CLI args (with optional YAML defaults) and run."""
     from main import main as run_main
 
-    # Collect all explicitly-provided CLI values
-    # typer passes through defaults for unset options, so we build the
-    # full dict then overlay YAML defaults underneath.
+    # typer passes a value for every option, defaults included
     cli_values = {
         "track": track, "year": year, "driver": driver, "use_tumftm": use_tumftm,
         "initial_soc": initial_soc, "final_soc_min": final_soc_min,
@@ -116,22 +104,25 @@ def cli(
         "flying_lap": flying_lap, "regulations": regulations,
         "enable_tire_degradation": enable_tire_degradation,
         "tire_wear_rate_per_lap": tire_wear_rate_per_lap,
-        "tire_min_grip_scale": tire_min_grip_scale, "solver": solver,
+        "tire_min_grip_scale": tire_min_grip_scale, "tire_model": tire_model,
+        "tire_compound": tire_compound, "ambient_temp_c": ambient_temp_c,
+        "track_temp_c": track_temp_c, "tire_init_temp_c": tire_init_temp_c, "solver": solver,
         "collocation": collocation, "nlp_solver": nlp_solver,
         "ipopt_linear_solver": ipopt_linear_solver, "ipopt_hessian": ipopt_hessian,
-        "vehicle_mass": vehicle_mass, "vehicle_c_w_a": vehicle_c_w_a,
-        "vehicle_c_z_a_f": vehicle_c_z_a_f, "vehicle_c_z_a_r": vehicle_c_z_a_r,
-        "vehicle_f_roll": vehicle_f_roll, "tire_fz_0": tire_fz_0,
-        "tire_mux_f": tire_mux_f, "tire_muy_f": tire_muy_f,
-        "tire_mux_r": tire_mux_r, "tire_muy_r": tire_muy_r,
-        "tire_model_exp": tire_model_exp,
         "plot": plot, "save_animation": save_animation,
     }
 
     if config is not None:
-        yaml_defaults = _load_yaml_defaults(config)
-        # YAML provides defaults; CLI args override
-        merged = {**yaml_defaults, **cli_values}
+        yaml_values = _load_yaml_defaults(config)
+        unknown = sorted(set(yaml_values) - {field.name for field in fields(AppConfig)})
+        if unknown:
+            raise typer.BadParameter(f"unknown keys in {config}: {', '.join(unknown)}", param_hint="--config")
+        # YAML replaces the defaults; only options typed on the command line override it
+        typed = {
+            name: value for name, value in cli_values.items()
+            if ctx.get_parameter_source(name) not in (ParameterSource.DEFAULT, ParameterSource.DEFAULT_MAP)
+        }
+        merged = {**cli_values, **yaml_values, **typed}
     else:
         merged = cli_values
 
