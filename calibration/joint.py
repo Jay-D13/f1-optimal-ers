@@ -3,9 +3,11 @@ Joint fit: the shared car parameters plus one aero level per track.
 
 Teams bring low-drag wings to Monza and Spa and high-downforce ones to Budapest, so one car can't match every
 track's straights and fast corners. Each track gets an aero level k: ClA × (1 + k) and CdA × (1 + DRAG_PER_DOWNFORCE·k).
-Every round's k is set by the speeds of its sessions before qualifying (calibration/practice.py); the pole laps
-of the training rounds set the shared parameters. A held-out round's pole lap is never used, so its lap time
-stays a prediction (ROADMAP Phase 4, per-track scalars from non-pole sessions).
+Every round's k is set by the fastest lap of its sessions before qualifying (calibration/practice.py), solved under
+that session's energy rules: practice caps are up to 2.5 MJ higher than qualifying ones, so a practice lap clips
+less on the straights, and fitting it with the qualifying rules would read that as less drag. The pole laps of the
+training rounds set the shared parameters. A held-out round's pole lap is never used, so its lap time stays a
+prediction (ROADMAP Phase 4, per-track scalars from non-pole sessions).
 """
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -17,11 +19,10 @@ from scipy.optimize import least_squares
 from .dataset import reference_lap
 from .fit import FAILED, LAP_SIGMA, SPEED_SAMPLES, SPEED_SIGMA
 from .model import PARAMETERS, model_lap, model_speed_at
-from .practice import practice_speed
+from .practice import practice_lap
 
 DRAG_PER_DOWNFORCE = 0.5     # Relative drag change per relative downforce change between wing levels
 AERO_LEVEL_BOUNDS = (-0.3, 0.3)
-PRACTICE_STEP = 25.0         # (m) Spacing of the practice-speed residuals
 
 
 def round_params(params: Mapping[str, float], round_number: int) -> Dict[str, float]:
@@ -33,25 +34,31 @@ def round_params(params: Mapping[str, float], round_number: int) -> Dict[str, fl
     return values
 
 
+def trace_residuals(trajectory, reference) -> np.ndarray:
+    """The model's speed against a reference lap's samples, scaled so that the trace counts as SPEED_SAMPLES samples."""
+    speed = model_speed_at(trajectory, reference.s, reference.track.total_length)
+    return np.sqrt(SPEED_SAMPLES / len(reference.s)) * (speed - reference.speed) / SPEED_SIGMA
+
+
+def solved_lap(params: Mapping[str, float], reference):
+    trajectory = model_lap(params, reference)
+    if trajectory.solver_status != "optimal":
+        raise RuntimeError(f"{reference.name}: solver {trajectory.solver_status}")
+    return trajectory
+
+
 def round_residuals(params: Mapping[str, float], round_number: int, with_pole: bool) -> np.ndarray:
     """
-    Practice residuals (model speed against the practice speed profile, every PRACTICE_STEP metres), then, for a
-    training round, the pole-lap speed trace and lap time as in calibration/fit.py.
+    The practice lap's speed trace against the model under the practice session's rules, then, for a training
+    round, the pole-lap speed trace and lap time as in calibration/fit.py.
     """
-    reference = reference_lap(round_number)
-    trajectory = model_lap(round_params(params, round_number), reference)
-    if trajectory.solver_status != "optimal":
-        raise RuntimeError(f"Round {round_number}: solver {trajectory.solver_status}")
-    length = reference.track.total_length
-    grid = reference.track.track_data.s
-    practice = practice_speed(round_number, reference.track)
-    s = np.arange(0.0, length, PRACTICE_STEP)
-    measured = np.interp(s, grid, practice, period=length)
-    weight = np.sqrt(SPEED_SAMPLES / len(s))
-    parts = [weight * (model_speed_at(trajectory, s, length) - measured) / SPEED_SIGMA]
+    car = round_params(params, round_number)
+    practice = practice_lap(round_number)
+    parts = [trace_residuals(solved_lap(car, practice), practice)]
     if with_pole:
-        speed = model_speed_at(trajectory, reference.s, length)
-        parts.append(np.sqrt(SPEED_SAMPLES / len(reference.s)) * (speed - reference.speed) / SPEED_SIGMA)
+        reference = reference_lap(round_number)
+        trajectory = solved_lap(car, reference)
+        parts.append(trace_residuals(trajectory, reference))
         parts.append([(trajectory.lap_time - reference.lap_time) / LAP_SIGMA])
     return np.concatenate(parts)
 

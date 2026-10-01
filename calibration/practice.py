@@ -1,10 +1,12 @@
 """
-Speeds from an event's sessions before qualifying (practice, and sprint qualifying on sprint weekends), and a
-bound on the path curvature from them.
+Data from an event's sessions before qualifying (practice, and sprint qualifying on sprint weekends): a bound on
+the path curvature, and the fastest lap as a reference for the per-track aero level (calibration/joint.py).
 
 The placed TUM racelines are tighter than the driven line at a few fast corners (TRK-11): the pole speeds would
 need 6–7 g there. The bound caps the curvature so that the speeds seen in those earlier sessions need at most
-G_MAX. It never uses the qualifying session, so a held-out round stays a prediction.
+G_MAX. The high-percentile speeds it uses are an envelope over many laps, faster in every bin than any one lap,
+so they only bound the path: the aero level is fitted to one real lap, solved with its session's energy rules.
+Neither uses the qualifying session, so a held-out round stays a prediction.
 """
 import logging
 import pickle
@@ -12,9 +14,11 @@ from pathlib import Path
 
 import numpy as np
 
+from config.events import EVENTS_2026
+from models import air_density
 from models.telemetry import clean_laps, load_session
 
-from .dataset import CACHE, lap_distances
+from .dataset import CACHE, MAX_FROZEN, ReferenceLap, lap_distances, lap_samples, reference_lap
 
 SESSIONS = ("FP1", "FP2", "FP3", "SQ")   # Whichever the event has
 BIN = 10.0                               # (m) Width of the speed bins along the lap
@@ -90,3 +94,63 @@ def bound_curvature(track, speed: np.ndarray, g_max: float = G_MAX) -> np.ndarra
     td.curvature = td.curvature * kept
     td.radius = np.clip(1.0 / (np.abs(td.curvature) + 1e-6), 10, 10000)
     return kept
+
+
+def session_air_density(session):
+    """Air density (kg/m³) from the session's median weather, or None without weather data."""
+    weather = getattr(session, "weather_data", None)
+    if weather is None or len(weather) == 0:
+        return None
+    return air_density(float(weather["AirTemp"].median()), float(weather["Pressure"].median()),
+                       float(weather["Humidity"].median()))
+
+
+def practice_lap(round_number: int, ds: float = 5.0, refresh: bool = False) -> ReferenceLap:
+    """
+    The fastest clean lap of the sessions before qualifying with at most MAX_FROZEN frozen samples, on the pole
+    reference's path, with its session's weather and energy rules: the practice cap in free practice, the
+    qualifying cap in sprint qualifying (C5.2.10; Monza: 7.5 MJ against 5.0 MJ). Cached in data/cache/calibration.
+    """
+    path = CACHE / f"R{round_number:02d}_practice_lap_ds{ds:g}.pkl"
+    if path.exists() and not refresh:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    track = reference_lap(round_number, ds).track
+    logging.getLogger("fastf1").setLevel(logging.ERROR)
+    candidates = []
+    for name in SESSIONS:
+        try:
+            session, _, _ = load_session(2026, round_number, name)
+        except Exception:
+            continue                      # The event doesn't have this session
+        laps = clean_laps(session)
+        laps = laps[laps["LapTime"].notna()].sort_values("LapTime").head(10)
+        candidates += [(lap["LapTime"].total_seconds(), name, session, lap) for _, lap in laps.iterrows()]
+    if not candidates:
+        raise ValueError(f"Round {round_number}: no laps before qualifying")
+    candidates.sort(key=lambda c: c[0])
+
+    for lap_time, name, session, lap in candidates[:10]:
+        try:
+            car = lap.get_car_data().merge_channels(lap.get_pos_data(), frequency="original")
+        except Exception:
+            continue
+        car = car[car["Source"] == "car"].dropna(subset=["X", "Y", "Speed"])
+        frozen = ((car["Throttle"] >= 104) & car["Brake"].astype(bool)).to_numpy()
+        if len(car) >= 50 and frozen.mean() <= MAX_FROZEN:
+            break
+    else:
+        raise ValueError(f"Round {round_number}: no fast lap before qualifying has fewer than {MAX_FROZEN:.0%} frozen samples")
+    s, speed, throttle, brake = lap_samples(car[~frozen], track)
+
+    reference = ReferenceLap(
+        round=round_number, name=f"{EVENTS_2026[round_number].name} {name}", driver=str(lap["Driver"]),
+        lap_time=float(lap_time), pole_time=float(candidates[0][0]), s=s, speed=speed, throttle=throttle,
+        brake=brake, air_density=session_air_density(session), track=track,
+        rules="qualifying" if name == "SQ" else "practice",
+    )
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(reference, f)
+    return reference

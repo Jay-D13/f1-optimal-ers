@@ -37,7 +37,7 @@ class AppConfig:
     ipopt_linear_solver: str = "mumps"
     ipopt_hessian: Literal["limited-memory", "exact"] = "exact"
     regulations: Literal["2025", "2026"] = "2025"
-    session: Literal["qualifying", "race"] = "qualifying"
+    session: Literal["qualifying", "practice", "race"] = "qualifying"
     event: str | None = None
 
 
@@ -70,7 +70,7 @@ def cli(
     laps: Annotated[int, typer.Option(help="Number of laps in the NLP horizon")] = 1,
     flying_lap: Annotated[bool, typer.Option("--flying-lap/--no-flying-lap", help="Continuous lap (no standing start)")] = True,
     regulations: Annotated[str, typer.Option(help="Regulation set: 2025 or 2026")] = "2025",
-    session: Annotated[str, typer.Option(help="2026 energy rules: qualifying (Overtake curve, start full, run-up from the last corner) or race")] = "qualifying",
+    session: Annotated[str, typer.Option(help="2026 energy rules: qualifying (Overtake curve, start full, run-up from the last corner), practice (the same with the practice cap) or race")] = "qualifying",
     event: Annotated[Optional[str], typer.Option(help="2026 round number or name for the event's energy limits (default: from --track)")] = None,
 
     # ── Tire degradation ──────────────────────────────────────────

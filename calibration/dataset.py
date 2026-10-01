@@ -39,6 +39,7 @@ class ReferenceLap:
     brake: np.ndarray        # (0 or 1)
     air_density: Optional[float]
     track: F1TrackModel      # The model's path for this round (placed raceline, zones, height)
+    rules: str = "qualifying"  # The session's 2026 energy rules (config.get_ers_config): qualifying or practice
 
     def speed_at(self, s) -> np.ndarray:
         """Measured speed (m/s) at lap distances s, interpolated around the lap."""
@@ -71,6 +72,20 @@ def lap_distances(xy: np.ndarray, speed: np.ndarray, seconds: np.ndarray, track:
     s[stray] = (along[stray] + offset) % length
     # Continuous over the lap: samples before the line come out near the end, samples after the lap near 0
     return along + offset + wrap(s - along - offset)
+
+
+def lap_samples(car, track: F1TrackModel):
+    """
+    Lap distance on the track's path (in [0, lap length), sorted, unique), speed (m/s), throttle (%) and brake
+    (0 or 1) of one lap's car-data samples, which must carry positions and no frozen blocks.
+    """
+    seconds = car["SessionTime"].dt.total_seconds().to_numpy()
+    speed = car["Speed"].to_numpy(dtype=float) / 3.6
+    s = lap_distances(car[["X", "Y"]].to_numpy(dtype=float) / 10.0, speed, seconds - seconds[0], track) % track.total_length
+    order = np.argsort(s, kind="stable")
+    order = order[np.concatenate([[True], np.diff(s[order]) > 0.0])]
+    return (s[order], speed[order], car["Throttle"].to_numpy(dtype=float)[order],
+            car["Brake"].astype(float).to_numpy()[order])
 
 
 MAX_FROZEN = 0.05   # Largest share of frozen car-data samples in a reference lap
@@ -106,20 +121,12 @@ def reference_lap(round_number: int, ds: float = 5.0, refresh: bool = False) -> 
             break
     else:
         raise ValueError(f"No lap in the top 10 of round {round_number} has fewer than {MAX_FROZEN:.0%} frozen samples")
-    car = car[~frozen]
-
-    seconds = (car["SessionTime"] - telemetry["SessionTime"].iloc[0]).dt.total_seconds().to_numpy()
-    speed = car["Speed"].to_numpy(dtype=float) / 3.6
-    s = lap_distances(car[["X", "Y"]].to_numpy(dtype=float) / 10.0, speed, seconds, track) % track.total_length
-    order = np.argsort(s, kind="stable")
-    keep = np.concatenate([[True], np.diff(s[order]) > 0.0])
-    order = order[keep]
+    s, speed, throttle, brake = lap_samples(car[~frozen], track)
 
     reference = ReferenceLap(
         round=round_number, name=EVENTS_2026[round_number].name, driver=str(lap["Driver"]),
         lap_time=float(lap["LapTime"].total_seconds()), pole_time=pole_time,
-        s=s[order], speed=speed[order], throttle=car["Throttle"].to_numpy(dtype=float)[order],
-        brake=car["Brake"].astype(float).to_numpy()[order], air_density=track.air_density, track=track,
+        s=s, speed=speed, throttle=throttle, brake=brake, air_density=track.air_density, track=track,
     )
     CACHE.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:

@@ -377,7 +377,13 @@ params = fit.run(max_evaluations=15)                   # least squares on the sp
 print_report(report(params, [3, 8, 11]))               # held-out rounds
 ```
 
-A round's residuals are the speed error at every measured sample (weighted like 100 samples, 8 km/h scale) and the lap-time error (0.2 s scale). Jacobians are forward differences, with the solves run in parallel. `calibration/plots.py` draws the model and measured speed traces per round. The first fits do not meet the Phase 4 targets yet (held-out lap time median 1.3 %, max 1.7 %), and push parameters to their bounds; see the roadmap.
+A round's residuals are the speed error at every measured sample (weighted like 100 samples, 8 km/h scale) and the lap-time error (0.2 s scale). Jacobians are forward differences, with the solves run in parallel; a failed solve rejects the step instead of ending the fit.
+
+- **Curvature bound** (`calibration/practice.py`): the placed TUM lines are tighter than the driven line at a few fast corners, so the curvature is capped where the speeds of the sessions before qualifying (practice, sprint qualifying) would need more than 5 g. Qualifying data is never used, so held-out rounds stay predictions.
+- **Joint fit** (`calibration/joint.py`): the shared parameters plus one aero level per track (ClA × (1 + k), CdA × (1 + 0.5 k)), each level set from that event's fastest practice lap under its session's energy rules; only the training rounds' pole laps set the shared parameters.
+- **Diagnostics** (`calibration/plots.py`): model and measured speed traces per round.
+
+**Status:** the targets (held-out lap time median ≤ 0.5 %, max ≤ 1 %) are not met yet. Best so far: median 1.30 %, max 1.71 % with one shared car; the joint fit gives 1.43 % and 2.45 %. The errors follow track type (too fast at Shanghai and Budapest, too slow at Monza and Spa), which points at how the model spends energy on the straights.
 
 ### Critical: SOC Boundaries Affect Results Dramatically
 

@@ -128,22 +128,27 @@ def get_ers_config(
     ERS rules for a regulation set. For 2026 qualifying (session="qualifying"): the Overtake deploy curve,
     the 4 MJ window with a full store at the start, and the event's recharge cap and super-clip limit
     (`event` is a 2026 round number or track name; unknown events keep the base 8.5 MJ and 350 kW).
-    Sessions don't change the 2025 rules.
+    A 2026 practice push lap (session="practice") has the same rules with the event's practice cap
+    (9.0 MJ for unknown events). Sessions don't change the 2025 rules.
     """
     cfg = base or ERSConfig()
     
     if regulation_set not in _REG_OVERRIDES:
         raise ValueError(f"Unknown regulation set: {regulation_set}. Options: {list(_REG_OVERRIDES.keys())}")
-    if session not in ("race", "qualifying"):
-        raise ValueError(f"Unknown session: {session}. Options: race, qualifying")
+    if session not in ("race", "qualifying", "practice"):
+        raise ValueError(f"Unknown session: {session}. Options: race, qualifying, practice")
 
     cfg = replace(cfg, **_REG_OVERRIDES[regulation_set])
-    if regulation_set != "2026" or session != "qualifying":
+    if regulation_set != "2026" or session == "race":
         return cfg
 
     from config.events import find_event_2026
 
     found = find_event_2026(event)
+    if session == "practice":
+        recharge_mj = found.practice_recharge_mj if found else 9.0
+    else:
+        recharge_mj = found.quali_recharge_mj if found else 8.5
     return replace(
         cfg,
         deploy_curve="overtake",
@@ -151,7 +156,7 @@ def get_ers_config(
         min_soc=0.0,
         max_soc=1.0,
         qualifying=True,
-        recovery_limit_per_lap=(found.quali_recharge_mj if found else 8.5) * 1e6,
+        recovery_limit_per_lap=recharge_mj * 1e6,
         superclip_power=(found.superclip_kw if found else 350.0) * 1e3,
         ramp_rate=(found.ramp_rate_kw_s if found else 100.0) * 1e3,
     )
