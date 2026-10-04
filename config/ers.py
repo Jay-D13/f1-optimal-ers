@@ -74,11 +74,17 @@ class ERSConfig:
     superclip_power: Optional[float] = None
     # Qualifying lap: start with a full store, include the run-up from the last corner, finish anywhere
     qualifying: bool = False
-    # Ramp-down of the ERS-K power at full throttle (C5.12.4-7): a first step of at most ramp_first_step,
-    # then at most ramp_rate, while the ERS-K DC power is above ramp_release. None: no ramp rules.
+    # Ramp-down of the ERS-K power at full throttle (C5.12.4-7): a first step of at most ramp_first_step, held for
+    # ramp_hold, then at most ramp_rate, while the ERS-K DC power is above ramp_release; the deploy demand may not
+    # rise again. The rules start ramp_trigger after full throttle begins (the "power limited pending" period).
+    # None: no ramp rules.
     ramp_rate: Optional[float] = None       # [W/s]
     ramp_first_step: float = 150e3          # [W]
     ramp_release: float = 100e3             # [W]
+    ramp_hold: float = 1.0                  # [s]
+    ramp_trigger: float = 1.0               # [s]
+    # The event's per-sector exceptions (config.events.RampWindow): 350 kW first steps, resets, speed thresholds
+    ramp_windows: tuple = ()
     
     @property
     def usable_soc_range(self) -> float:
@@ -127,7 +133,8 @@ def get_ers_config(
     """
     ERS rules for a regulation set. For 2026 qualifying (session="qualifying"): the Overtake deploy curve,
     the 4 MJ window with a full store at the start, and the event's recharge cap and super-clip limit
-    (`event` is a 2026 round number or track name; unknown events keep the base 8.5 MJ and 350 kW).
+    (`event` is a 2026 round number or track name; unknown events keep the base 8.5 MJ and 350 kW), with the
+    ramp-down rules and the event's ramp windows (practice drops the qualifying-only ones).
     A 2026 practice push lap (session="practice") has the same rules with the event's practice cap
     (9.0 MJ for unknown events). Sessions don't change the 2025 rules.
     """
@@ -159,6 +166,7 @@ def get_ers_config(
         recovery_limit_per_lap=recharge_mj * 1e6,
         superclip_power=(found.superclip_kw if found else 350.0) * 1e3,
         ramp_rate=(found.ramp_rate_kw_s if found else 100.0) * 1e3,
+        ramp_windows=found.ramp_windows_for(session) if found else (),
     )
 
 

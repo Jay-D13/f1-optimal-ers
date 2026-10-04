@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"  # Mondays 05:00 UTC: the unit tests plus the 34-case track sweep
+
+jobs:
+  unit:
+    # The unit tests, as in the README: uv sync, then unittest discovery
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Create the FastF1 cache directory
+        run: mkdir -p data/cache
+      - name: Unit tests
+        run: uv run --locked python -m unittest discover -s tests
+
+  sweep:
+    # Every bundled track under both rule sets (RUN_TRACK_SWEEP=1), weekly or on demand
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MPLBACKEND: Agg
+      RUN_TRACK_SWEEP: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Create the FastF1 cache directory
+        run: mkdir -p data/cache
+      - name: Unit tests and track sweep
+        run: uv run --locked python -m unittest discover -s tests

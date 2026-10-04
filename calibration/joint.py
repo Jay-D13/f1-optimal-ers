@@ -17,7 +17,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .dataset import reference_lap
-from .fit import FAILED, LAP_SIGMA, SPEED_SAMPLES, SPEED_SIGMA
+from .fit import FAILED, LAP_SIGMA, SPEED_SAMPLES, SPEED_SIGMA, report_row, structure_residuals
 from .model import PARAMETERS, model_lap, model_speed_at
 from .practice import practice_lap
 
@@ -47,19 +47,26 @@ def solved_lap(params: Mapping[str, float], reference):
     return trajectory
 
 
-def round_residuals(params: Mapping[str, float], round_number: int, with_pole: bool) -> np.ndarray:
+def round_residuals(params: Mapping[str, float], round_number: int, with_pole: bool, structure: bool = False) -> np.ndarray:
     """
     The practice lap's speed trace against the model under the practice session's rules, then, for a training
-    round, the pole-lap speed trace and lap time as in calibration/fit.py.
+    round, the pole-lap speed trace and lap time as in calibration/fit.py. With structure=True each lap's
+    time-structure durations follow its speed trace (calibration/fit.py, structure_residuals); the practice lap's
+    are position-free and use no pole data, so a held-out round gets them too.
     """
     car = round_params(params, round_number)
     practice = practice_lap(round_number)
-    parts = [trace_residuals(solved_lap(car, practice), practice)]
+    trajectory = solved_lap(car, practice)
+    parts = [trace_residuals(trajectory, practice)]
+    if structure:
+        parts.append(structure_residuals(trajectory, practice))
     if with_pole:
         reference = reference_lap(round_number)
         trajectory = solved_lap(car, reference)
         parts.append(trace_residuals(trajectory, reference))
         parts.append([(trajectory.lap_time - reference.lap_time) / LAP_SIGMA])
+        if structure:
+            parts.append(structure_residuals(trajectory, reference))
     return np.concatenate(parts)
 
 
@@ -73,11 +80,11 @@ def _job(args):
 
 
 class JointFit:
-    """Least squares over the named shared PARAMETERS and one aero level per round."""
+    """Least squares over the named shared PARAMETERS and one aero level per round (structure=True: see round_residuals)."""
 
     def __init__(self, train: Sequence[int], held_out: Sequence[int], names: Sequence[str], start: Mapping[str, float] = None,
-                 workers: int = 8):
-        self.train, self.held_out, self.workers = list(train), list(held_out), workers
+                 workers: int = 8, structure: bool = False):
+        self.train, self.held_out, self.workers, self.structure = list(train), list(held_out), workers, structure
         self.rounds = self.train + self.held_out
         self.shared = [p for p in PARAMETERS if p.name in names]
         self.fixed = {p.name: p.start for p in PARAMETERS}
@@ -110,7 +117,7 @@ class JointFit:
 
     def _job_list(self, x, rounds):
         values = self.params(x)
-        return [(values, r, r in self.train) for r in rounds]
+        return [(values, r, r in self.train, self.structure) for r in rounds]
 
     def residuals(self, x) -> np.ndarray:
         key = tuple(np.round(x, 12))
@@ -163,18 +170,10 @@ class JointFit:
 def _report_row(args):
     params, round_number = args
     reference = reference_lap(round_number)
-    trajectory = model_lap(round_params(params, round_number), reference)
-    speed = model_speed_at(trajectory, reference.s, reference.track.total_length)
-    return {
-        "round": round_number, "name": reference.name, "status": trajectory.solver_status,
-        "lap_model": trajectory.lap_time, "lap_real": reference.lap_time,
-        "lap_error_pct": 100.0 * (trajectory.lap_time - reference.lap_time) / reference.lap_time,
-        "speed_rmse_kmh": 3.6 * float(np.sqrt(np.mean((speed - reference.speed) ** 2))),
-        "top_model_kmh": 3.6 * float(trajectory.v_opt.max()), "top_real_kmh": 3.6 * reference.top_speed,
-    }
+    return report_row(model_lap(round_params(params, round_number), reference), reference)
 
 
 def report(params: Mapping[str, float], rounds: Sequence[int], workers: int = 8) -> List[Dict]:
-    """Lap time error, speed RMSE and top speeds per round, each with its own aero level."""
+    """Lap time error, speed RMSE, top speeds and time structure per round, each with its own aero level."""
     with ProcessPoolExecutor(workers) as pool:
         return list(pool.map(_report_row, [(dict(params), r) for r in rounds]))
