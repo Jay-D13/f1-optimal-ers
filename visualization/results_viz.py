@@ -2,13 +2,55 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional
 
+from config import ERSConfig
 from solvers import OptimalTrajectory
 from models import F1TrackModel
+from models.car import deploy_power_limit
+
+# Above this the per-lap deployment limit is "no limit" (the 2026 rules set it to 100 MJ)
+_NO_ENERGY_LIMIT = 50e6
+
+
+def soc_band(ers: Optional[ERSConfig] = None) -> tuple:
+    """
+    The SOC band the solver enforces, in %: min_soc to max_soc, raised for a 2026 qualifying lap to the floor
+    of the stored-energy window below its full start (C5.2.9).
+    """
+    ers = ers or ERSConfig()
+    low, high = ers.min_soc, ers.max_soc
+    if ers.qualifying and ers.soc_window is not None:
+        low = max(low, high - ers.soc_window / ers.battery_capacity)
+    return 100.0 * low, 100.0 * high
+
+
+def power_limits(v: np.ndarray, ers: Optional[ERSConfig] = None) -> tuple:
+    """Deploy limit at each speed (the regulation's deploy curve) and the harvest limit, in kW (DC from 2026)."""
+    ers = ers or ERSConfig()
+    v = np.asarray(v, dtype=float)
+    deploy = np.broadcast_to(np.asarray(deploy_power_limit(v, ers), dtype=float).ravel(), v.shape)
+    return deploy / 1000.0, -ers.max_recovery_power / 1000.0
+
+
+def _draw_power_limits(ax, s_km: np.ndarray, v: np.ndarray, ers: Optional[ERSConfig], label=None):
+    deploy_kw, harvest_kw = power_limits(v, ers)
+    ax.plot(s_km, deploy_kw, color='b', linestyle='--', alpha=0.5, label=label)
+    ax.axhline(y=harvest_kw, color='b', linestyle='--', alpha=0.5)
+
+
+def _draw_soc_band(ax, s_km: np.ndarray, ers: Optional[ERSConfig], linestyle='--', label=None, fill=True):
+    low, high = soc_band(ers)
+    ax.axhline(y=low, color='r', linestyle=linestyle, alpha=0.5, label=label)
+    ax.axhline(y=high, color='r', linestyle=linestyle, alpha=0.5)
+    if fill:
+        ax.fill_between(s_km, low, high, alpha=0.1, color='green')
+
 
 def plot_offline_solution(trajectory: OptimalTrajectory,
                            title: str = "Offline Optimal Solution",
-                           save_path: Optional[str] = None) -> plt.Figure:
-    
+                           save_path: Optional[str] = None,
+                           ers_config: Optional[ERSConfig] = None) -> plt.Figure:
+    """Overview of a solution. The SOC and power limits come from ers_config (default: the 2025 rules)."""
+
     fig, axes = plt.subplots(3, 2, figsize=(14, 12))
     
     s_km = trajectory.s / 1000
@@ -21,8 +63,7 @@ def plot_offline_solution(trajectory: OptimalTrajectory,
     
     # Optimal SOC
     axes[0, 1].plot(s_km, trajectory.soc_opt * 100, 'g-', linewidth=1.5)
-    axes[0, 1].axhline(y=10, color='r', linestyle=':', alpha=0.5)
-    axes[0, 1].axhline(y=90, color='r', linestyle=':', alpha=0.5)
+    _draw_soc_band(axes[0, 1], s_km, ers_config, linestyle=':', fill=False)
     axes[0, 1].set_ylabel('State of Charge (%)')
     axes[0, 1].set_title('Optimal SOC Trajectory')
     axes[0, 1].grid(True, alpha=0.3)
@@ -32,8 +73,7 @@ def plot_offline_solution(trajectory: OptimalTrajectory,
     P_ers_kw = trajectory.P_ers_opt / 1000
     colors = ['green' if p >= 0 else 'red' for p in P_ers_kw]
     axes[1, 0].bar(s_km[:-1], P_ers_kw, width=s_km[1]-s_km[0], color=colors, alpha=0.7)
-    axes[1, 0].axhline(y=120, color='b', linestyle='--', alpha=0.5)
-    axes[1, 0].axhline(y=-120, color='b', linestyle='--', alpha=0.5)
+    _draw_power_limits(axes[1, 0], s_km[:-1], trajectory.v_opt[:-1], ers_config)
     axes[1, 0].set_ylabel('ERS Power (kW)')
     axes[1, 0].set_title('Optimal ERS Strategy')
     axes[1, 0].grid(True, alpha=0.3)
@@ -67,8 +107,9 @@ def plot_offline_solution(trajectory: OptimalTrajectory,
 def plot_simple_results(trajectory: OptimalTrajectory, 
                        velocity_profile,
                        track,
-                       track_name: str) -> plt.Figure:
-    
+                       track_name: str,
+                       ers_config: Optional[ERSConfig] = None) -> plt.Figure:
+    """Speed, SOC, ERS power and curvature. The SOC limits come from ers_config (default: the 2025 rules)."""
     fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
     
     s = trajectory.s / 1000  # Convert to km
@@ -84,9 +125,7 @@ def plot_simple_results(trajectory: OptimalTrajectory,
     
     # SOC
     axes[1].plot(s, trajectory.soc_opt * 100, 'g-', linewidth=1.5)
-    axes[1].axhline(y=20, color='r', linestyle='--', alpha=0.5, label='SOC limits')
-    axes[1].axhline(y=90, color='r', linestyle='--', alpha=0.5)
-    axes[1].fill_between(s, 20, 90, alpha=0.1, color='green')
+    _draw_soc_band(axes[1], s, ers_config, label='SOC limits')
     axes[1].set_ylabel('SOC (%)', fontsize=11)
     axes[1].legend(fontsize=10)
     axes[1].grid(True, alpha=0.3)
@@ -123,13 +162,16 @@ def create_comparison_plot(track: F1TrackModel,
                           velocity_no_ers: np.ndarray,
                           velocity_with_ers: np.ndarray,
                           optimal_trajectory: OptimalTrajectory,
-                          track_name: str) -> plt.Figure:
+                          track_name: str,
+                          ers_config: Optional[ERSConfig] = None) -> plt.Figure:
     """
     Create a comprehensive comparison plot showing:
     - Theoretical max speed without ERS
     - Theoretical max speed with ERS
     - Optimal trajectory details
+    The SOC, power and energy limits come from ers_config (default: the 2025 rules).
     """
+    ers = ers_config or ERSConfig()
     
     fig = plt.figure(figsize=(16, 12))
     
@@ -166,9 +208,7 @@ def create_comparison_plot(track: F1TrackModel,
     # State of Charge
     ax3 = plt.subplot(4, 2, 3)
     ax3.plot(s_km, optimal_trajectory.soc_opt * 100, 'g-', linewidth=2)
-    ax3.axhline(y=20, color='r', linestyle='--', alpha=0.5, label='SOC limits')
-    ax3.axhline(y=90, color='r', linestyle='--', alpha=0.5)
-    ax3.fill_between(s_km, 20, 90, alpha=0.1, color='green')
+    _draw_soc_band(ax3, s_km, ers, label='SOC limits')
     ax3.set_ylabel('SOC (%)')
     ax3.set_xlabel('Distance (km)')
     ax3.set_title('Battery State of Charge')
@@ -183,8 +223,7 @@ def create_comparison_plot(track: F1TrackModel,
                      color='green', alpha=0.6, label='Deploy')
     ax4.fill_between(s_km[:-1], 0, P_ers_kw, where=(P_ers_kw < 0),
                      color='red', alpha=0.6, label='Harvest')
-    ax4.axhline(y=120, color='b', linestyle='--', alpha=0.5, label='Limits')
-    ax4.axhline(y=-120, color='b', linestyle='--', alpha=0.5)
+    _draw_power_limits(ax4, s_km[:-1], optimal_trajectory.v_opt[:-1], ers, label='Limits')
     ax4.set_ylabel('ERS Power (kW)')
     ax4.set_xlabel('Distance (km)')
     ax4.set_title('ERS Deployment Strategy')
@@ -214,7 +253,11 @@ def create_comparison_plot(track: F1TrackModel,
     ax6.plot(s_km[:-1], cumulative_deployed, 'g-', label='Deployed', linewidth=2)
     ax6.plot(s_km[:-1], cumulative_recovered, 'b-', label='Recovered', linewidth=2)
     ax6.plot(s_km[:-1], cumulative_net, 'r--', label='Net Used', linewidth=2)
-    ax6.axhline(y=4.0, color='k', linestyle=':', alpha=0.5, label='4MJ Limit')
+    if ers.deployment_limit_per_lap < _NO_ENERGY_LIMIT:
+        ax6.axhline(y=ers.deployment_limit_per_lap / 1e6, color='g', linestyle=':', alpha=0.5,
+                    label=f'Deploy limit {ers.deployment_limit_per_lap / 1e6:.1f} MJ')
+    ax6.axhline(y=ers.recovery_limit_per_lap / 1e6, color='b', linestyle=':', alpha=0.5,
+                label=f'Recharge limit {ers.recovery_limit_per_lap / 1e6:.1f} MJ')
     ax6.set_ylabel('Energy (MJ)')
     ax6.set_xlabel('Distance (km)')
     ax6.set_title('Cumulative Energy')

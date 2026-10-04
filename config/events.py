@@ -9,6 +9,11 @@ The ramp rate applies after the first power step of a derate (C5.12.6).
 Straight Mode zones: normal-grip activation points from the FIA "Competition Notes – Circuit Map" of each event,
 as (corner, metres after it) with FastF1's corner labels. The maps draw each zone but give no end point in text;
 models/telemetry.py ends it at the next corner marker.
+Ramp windows: the PUI's per-sector exceptions to the derate rules (C5.12.4, .5, .7), as lap distances from the
+timing line in the FIA's metres: "first_step_350" sectors where the first reduction may be 350 kW instead of
+150 kW, "reset" sectors where the reduction may be reset (the deploy demand may rise again), and
+"speed_threshold" sectors where the ERS-K follows the ramp rates only above `value` km/h instead of 210 km/h.
+Windows the PUI marks for sprint qualifying and qualifying only have quali_only=True.
 Racelines: the bundled TUM raceline for the current layout, if there is one. The FastF1 positions are snapped to
 the timing provider's map line, not the line the cars drive (TRK-10), so rounds without a raceline (None) have no
 reliable path yet: Melbourne and Barcelona changed after the TUM data were made, and Miami, Monaco, Zandvoort,
@@ -16,6 +21,36 @@ Madrid and Baku are not in it. They are left out of calibration until that is so
 """
 from dataclasses import dataclass
 from typing import Optional
+
+
+RAMP_WINDOW_KINDS = ("first_step_350", "reset", "speed_threshold")
+
+
+@dataclass(frozen=True)
+class RampWindow:
+    kind: str                        # One of RAMP_WINDOW_KINDS
+    start_m: float                   # Lap distance from the timing line where the window starts (m)
+    end_m: float                     # ... and ends (m)
+    value: float = 0.0               # first_step_350: the first step (kW); speed_threshold: the threshold (km/h)
+    quali_only: bool = False         # Sprint qualifying and qualifying only
+
+    def __post_init__(self):
+        if self.kind not in RAMP_WINDOW_KINDS:
+            raise ValueError(f"Unknown ramp window kind: {self.kind}. Options: {RAMP_WINDOW_KINDS}")
+        if not self.end_m > self.start_m:
+            raise ValueError(f"Ramp window ends before it starts: {self}")
+
+
+def _first_step(start, end, quali_only=False):
+    return RampWindow("first_step_350", start, end, 350.0, quali_only)
+
+
+def _reset(start, end, quali_only=False):
+    return RampWindow("reset", start, end, 0.0, quali_only)
+
+
+def _threshold(start, end, kph, quali_only=False):
+    return RampWindow("speed_threshold", start, end, kph, quali_only)
 
 
 @dataclass(frozen=True)
@@ -32,6 +67,11 @@ class Event2026:
     verified: bool = True            # False when the cap is not from a public FIA document
     straight_mode_zones: tuple = ()  # Activation points: (corner label, metres after the corner marker)
     raceline: Optional[str] = None   # Bundled TUM raceline (data/racelines) for the current layout, if any
+    ramp_windows: tuple = ()         # RampWindow entries from the PUI (C5.12.4/5/7 sectors)
+
+    def ramp_windows_for(self, session: str) -> tuple:
+        """The ramp windows that apply in a session ("qualifying" includes sprint qualifying)."""
+        return tuple(w for w in self.ramp_windows if session == "qualifying" or not w.quali_only)
 
 
 EVENTS_2026 = {
@@ -49,6 +89,7 @@ EVENTS_2026 = {
                     straight_mode_zones=()),
     7: Event2026(7, "Barcelona", ("catalunya", "barcelona"), 7.0, 8.5, 9.0, 2440, 100, 350,
                     straight_mode_zones=(("14", 45), ("3", 0), ("5", 90), ("9", 40))),  # "40 m before the exit of T3": taken at the marker
+    # Barcelona's PUI V2 (Doc 31, 13 Jun) has C5.12.7 windows, but their positions are not transcribed yet.
     8: Event2026(8, "Austria", ("spielberg", "austria"), 6.0, 8.0, 8.5, 2923, 100, 350,
                     straight_mode_zones=(("10", 110), ("1", 110), ("3", 90), ("8", 10)), raceline="Spielberg"),  # Pairing of points and corners unsure
     9: Event2026(9, "Great Britain", ("silverstone",), 6.5, 8.0, 8.5, 3833, 50, 350,
@@ -57,15 +98,33 @@ EVENTS_2026 = {
                     straight_mode_zones=(("19", 190), ("1", 140), ("4", 60), ("15", 140), ("17", 80)), raceline="spa"),
     11: Event2026(11, "Hungary", ("budapest", "hungaroring"), 9.0, 8.5, 9.0, 1885, 100, 350,
                     straight_mode_zones=(("14", 40), ("1A", 30), ("3", 50), ("11", 60)), raceline="Budapest"),  # "30 m after T1A entry": taken after the marker
-    # The Dutch PUI is not public: 7.5 MJ from ScuderiaFans, 9 MJ per SomersF1 (REFERENCE_2026 §4)
-    12: Event2026(12, "Netherlands", ("zandvoort",), 7.5, 8.5, 9.0, 2411, 100, 350, verified=False,
-                    straight_mode_zones=(("14", 20), ("10", 50))),
+    # Dutch PUI (Doc 3, 19 Aug 2026, under fia.com/system/files/documents/): SQ and Q 7.5 MJ, PLD 2411 m, 100 kW/s
+    # Windows: 350 kW first step at T2-T3, T8-T10 and exit T13 (Q only), reset at exit T14 (bracketed in the PUI,
+    # taken as Q only); no C5.12.7 window.
+    12: Event2026(12, "Netherlands", ("zandvoort",), 7.5, 8.5, 9.0, 2411, 100, 350,
+                    straight_mode_zones=(("14", 20), ("10", 50)),
+                    ramp_windows=(_first_step(670, 800), _first_step(2000, 2450), _first_step(3450, 3650, True),
+                                  _reset(3700, 4200, True))),
     13: Event2026(13, "Italy", ("monza",), 5.0, 7.0, 7.5, 4218, 50, 350,
                     straight_mode_zones=(("11", 30), ("3", 70), ("7", 170), ("10", 130)), raceline="monza"),
+    # Madrid PUI V2 (Doc 25, 11 Sep): the C5.12.4 windows. Its C5.12.5 resets and per-corner C5.12.7 thresholds
+    # (240-260 km/h) are not transcribed yet, and the Race Director's event notes moved windows mid-weekend.
     14: Event2026(14, "Spain (Madrid)", ("madrid", "madring"), 7.5, 8.5, 9.0, 3206, 100, 350,
-                    straight_mode_zones=(("22", 100), ("3", 40))),
+                    straight_mode_zones=(("22", 100), ("3", 40)),
+                    ramp_windows=(_first_step(1900, 1975), _first_step(2200, 2300), _first_step(4100, 4800))),
+    # Baku PUI (Doc 5, 23 Sep): qualifying-only windows, a 350 kW first step from exit T16 and a reset at exit T20
     15: Event2026(15, "Azerbaijan", ("baku",), 8.5, 8.5, 9.0, 3796, 50, 350,
-                    straight_mode_zones=(("19", 45), ("2", 110))),
+                    straight_mode_zones=(("19", 45), ("2", 110)),
+                    ramp_windows=(_first_step(4050, 5300, True), _reset(5600, 6000, True))),
+    # The 2026 Bahrain Grand Prix is held at Sepang (PUI Doc 4 and circuit map Doc 7, both 1 Oct 2026). Windows:
+    # 350 kW first step at T1-T2, T5-T7, T9-T11, T12-T13 and exit T15 (SQ and Q); resets at exit T5, exit T6 and
+    # exit T15 (SQ and Q); a 270 km/h threshold at T5-T6 and T12-T13.
+    16: Event2026(16, "Bahrain (Sepang)", ("sepang", "kuala lumpur", "malaysia", "bahrain"), 7.5, 8.5, 9.0, 3365, 100, 350,
+                    straight_mode_zones=(("15", 65), ("3", 10), ("8", 65), ("14", 65)), raceline="Sepang",
+                    ramp_windows=(_first_step(600, 750), _first_step(1900, 2500), _first_step(3100, 3400),
+                                  _first_step(3750, 4000), _first_step(5050, 5300, True),
+                                  _reset(1950, 2100), _reset(2150, 2350), _reset(5200, 5500, True),
+                                  _threshold(1750, 2200, 270), _threshold(3700, 3900, 270))),
 }
 
 

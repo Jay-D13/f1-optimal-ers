@@ -148,6 +148,10 @@ _REGULATION_OVERRIDES: Mapping[str, Dict[str, float]] = {
     # 2026 new regulations
     "2026": {
         "mass": 772.0,          # [kg] 726 kg qualifying minimum + ~46 kg of tyres (C4.1; tyre mass unverified)
+        # [kg] Qualifying fuel, an estimate (no 2026 figure is published): about 1.3-1.5 kg per flying lap at
+        # 3,000 MJ/h, so out-lap, flying lap, in-lap and the 1 l FIA sample need roughly 3.5-5 kg at the start
+        # of a run (REFERENCE_2026.md §2, BUGS PHY-8)
+        "fuel_mass": 4.0,
         "pow_max_ice": 400e3,   # [W] ~536 HP (reduced ICE)
         "pow_max_ers": 350e3,   # [W] MGU-K power (350 kW - tripled!)
         "regulation_year": 2026,

@@ -6,6 +6,8 @@ dist/
 wheels/
 *.egg-info
 .*
+# ...except the GitHub Actions workflows
+!.github/
 
 # Virtual environments
 .venv

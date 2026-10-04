@@ -54,6 +54,11 @@ def _smooth_min(a, b, width):
     """min(a, b), rounded over about `width` so it stays smooth for Ipopt."""
     return 0.5 * (a + b - ca.sqrt((a - b) ** 2 + width**2))
 
+
+def _smooth_max(a, b, width):
+    """max(a, b), rounded over about `width` so it stays smooth for Ipopt."""
+    return 0.5 * (a + b + ca.sqrt((a - b) ** 2 + width**2))
+
 # NLP controls (see _build_and_solve)
 CONTROLS = ("P_DEPLOY", "P_HARVEST", "THROTTLE", "BRAKE_F", "BRAKE_R")
 
@@ -87,9 +92,14 @@ class SpatialNLPSolver(BaseSolver):
     BRAKE_COST = 1e-5
     # Width (W) over which the NLP rounds the deploy curve's corners, so Ipopt sees smooth constraints
     CURVE_SMOOTHING = 2e3
-    # Where the ramp-down rules apply (C5.12.7): at full throttle and above 210 km/h
+    # Where the ramp-down rules apply (C5.12.7): at full throttle and above 210 km/h (or a window's threshold)
     RAMP_FULL_THROTTLE = 0.99
     RAMP_MIN_SPEED = 210.0 / 3.6
+    # Width (W) over which the ramp rules' corners (first step, release at ramp_release) are rounded
+    RAMP_SMOOTHING = 20e3
+    # Inside the derate runs, nodes where the deploy curve could cut the power at the first solve's speed plus this
+    # margin (m/s) are treated as on the curve's taper
+    RAMP_CURVE_MARGIN = 10.0 / 3.6
 
     def __init__(
         self,
@@ -115,6 +125,7 @@ class SpatialNLPSolver(BaseSolver):
         self.N = max(1, int(track_model.total_length / ds))
         self.ds = track_model.total_length / self.N
         self.s_grid = np.linspace(0, track_model.total_length, self.N + 1)
+        self.ramp_runs = []  # Derate runs of the last solve with the ramp-down rules (see _full_throttle_runs)
 
     @property
     def name(self) -> str:
@@ -173,7 +184,7 @@ class SpatialNLPSolver(BaseSolver):
         )
         if self.vehicle.ers.ramp_rate is not None:
             # Second solve with the ramp-down rules inside the first solution's full-throttle runs
-            runs = self._full_throttle_runs(trajectory, run_up)
+            runs = self.ramp_runs = self._full_throttle_runs(run_up)
             self._log(f"Ramp-down rules on {len(runs)} full-throttle runs; solving again")
             trajectory = self._build_and_solve(
                 v_guess=np.clip(trajectory.v_opt[: self.N + 1], V_MIN, V_MAX),
@@ -182,6 +193,7 @@ class SpatialNLPSolver(BaseSolver):
                 is_flying_lap=is_flying_lap,
                 run_up=run_up,
                 ramp_runs=runs,
+                warm=self._horizon,
             )
         trajectory.solve_time = time.time() - start_time
 
@@ -199,22 +211,82 @@ class SpatialNLPSolver(BaseSolver):
             ).v
         return np.clip(self._sample_on_grid(v_guess), V_MIN, V_MAX)
 
-    def _full_throttle_runs(self, trajectory: OptimalTrajectory, run_up: int) -> list:
+    def _full_throttle_runs(self, run_up: int) -> list:
         """
-        Horizon node ranges where a solution is at full throttle above RAMP_MIN_SPEED, where the ramp-down
-        rules can apply. Nodes are offset by the run-up, whose own runs are left free.
+        The derate runs of the last solution, where the ramp-down rules apply (C5.12.4-8, REG-6), over the whole
+        horizon (run-up first, then the lap). Each is a dict of arrays over its consecutive horizon nodes:
+
+        - nodes: the horizon node indices;
+        - ref: for each node, the run's earliest node at most ramp_hold before it (a hold window ending there);
+        - exempt: the demand may fall freely into this node (below the speed threshold, C5.12.7). The exception
+          for a deploy curve below ramp_release (above 350 km/h) is not applied: it would depend on the solution's
+          speed, which a fixed set can't follow;
+        - extra_step: the first step allowed at this node beyond ramp_first_step (W; in first_step_350 windows);
+        - taper: the deploy curve may cut the power here (see RAMP_CURVE_MARGIN).
+
+        A full-throttle stretch triggers the rules ramp_trigger after it begins (the "power limited pending"
+        period). A run starts at the first triggered node at or above the speed threshold and lasts while the
+        throttle is full; a reset window ends it, and a new run starts after the window. Times use the last
+        solution's speeds.
         """
-        full = (trajectory.node_controls["throttle"] >= self.RAMP_FULL_THROTTLE) & (trajectory.v_opt >= self.RAMP_MIN_SPEED)
-        runs, current = [], []
-        for k, on in enumerate(full):
-            if on:
-                current.append(run_up + k)
-            elif current:
-                runs.append(current)
-                current = []
-        if current:
-            runs.append(current)
-        return [run for run in runs if len(run) >= 2]
+        ers = self.vehicle.ers
+        v, throttle = self._horizon["v"], self._horizon["throttle"]
+        n = len(v) - 1
+        node = np.arange(n + 1)
+        s_lap = np.where(node < run_up, self.N - run_up + node, node - run_up) * self.ds   # From the timing line
+        t = np.concatenate([[0.0], np.cumsum(self.ds / np.maximum(0.5 * (v[1:] + v[:-1]), 1.0))])
+
+        threshold = np.full(n + 1, self.RAMP_MIN_SPEED)
+        reset = np.zeros(n + 1, dtype=bool)
+        extra_step = np.zeros(n + 1)
+        for w in ers.ramp_windows:
+            inside = (s_lap >= w.start_m) & (s_lap <= w.end_m)
+            if w.kind == "reset":
+                reset |= inside
+            elif w.kind == "speed_threshold":
+                threshold[inside] = np.maximum(threshold[inside], w.value / 3.6)
+            elif w.kind == "first_step_350":
+                extra_step[inside] = np.maximum(extra_step[inside], w.value * 1e3 - ers.ramp_first_step)
+        exempt = v < threshold
+        # Where the deploy curve could cut below full power, were the car up to RAMP_CURVE_MARGIN faster
+        margin = self.RAMP_CURVE_MARGIN
+        taper = np.array([float(deploy_power_limit(x + margin, ers)) < ers.max_deployment_power for x in v])
+
+        full = throttle >= self.RAMP_FULL_THROTTLE
+        runs = []
+        k = 0
+        while k <= n:
+            if not full[k]:
+                k += 1
+                continue
+            end = k
+            while end <= n and full[end]:
+                end += 1
+            # This full-throttle stretch once the pending period has started, split by the reset windows
+            pieces, current = [], []
+            for j in range(k, end):
+                if t[j] - t[k] < ers.ramp_trigger - 1e-9:
+                    continue
+                if reset[j]:
+                    if current:
+                        pieces.append(current)
+                    current = []
+                else:
+                    current.append(j)
+            if current:
+                pieces.append(current)
+            for piece in pieces:
+                while piece and v[piece[0]] < threshold[piece[0]]:
+                    piece = piece[1:]
+                if len(piece) < 2:
+                    continue
+                nodes = np.array(piece)
+                t_run = t[nodes]
+                ref = np.searchsorted(t_run, t_run - ers.ramp_hold - 1e-9, side="left")
+                runs.append(dict(nodes=nodes, ref=ref, dt=np.diff(t_run, prepend=t_run[0]), exempt=exempt[nodes],
+                                 extra_step=extra_step[nodes], taper=taper[nodes]))
+            k = end
+        return runs
 
     def _run_up_intervals(self, v_grid: np.ndarray) -> int:
         """
@@ -316,6 +388,7 @@ class SpatialNLPSolver(BaseSolver):
         tire: DynamicTireSettings | None = None,
         run_up: int = 0,
         ramp_runs: list | None = None,
+        warm: dict | None = None,
     ) -> OptimalTrajectory:
         """
         Build and solve the CasADi optimization problem over n_laps consecutive laps.
@@ -325,7 +398,8 @@ class SpatialNLPSolver(BaseSolver):
         run_up > 0 adds that many intervals before the start line: the qualifying run-up from the last corner
         (REG-8). It isn't timed, the store is full at its start and its recharge doesn't count toward the
         lap's cap. Without a run-up, a flying lap is periodic in speed.
-        ramp_runs lists node ranges (full-throttle runs) inside which the ramp-down rules apply.
+        ramp_runs lists the derate runs (see _full_throttle_runs) inside which the ramp-down rules apply.
+        warm holds a previous solution of the same horizon (see _extract_trajectory) to start from.
         """
         opti = ca.Opti()
 
@@ -583,23 +657,70 @@ class SpatialNLPSolver(BaseSolver):
             for change, v_avg in steps:
                 opti.subject_to(opti.bounded(-max_step, change * v_avg, max_step))
 
-        # Ramp-down at full throttle (C5.12.4-7, REG-6), inside the full-throttle runs found by a first solve.
-        # A floor state tracks the ERS-K deploy above the release level: the deploy may sit at most one first
-        # step below the floor, and the floor falls at most at the ramp rate. Cuts the deploy curve forces are
-        # exempt. Outside the runs (lifting, braking, below 210 km/h) the rules don't apply.
+        # Ramp-down at full throttle (C5.12.4-8, REG-6), inside the derate runs found by a first solve.
+        # In each run a demand state D (net ERS-K power, DC) may only fall (C5.12.5; reset windows end the run),
+        # and the ERS-K follows it, y = D, except where the deploy curve cuts it (C5.2.8): on the curve's taper
+        # y = min(D, curve). Elsewhere y = D is linear, which keeps the solve times down.
+        # While D is above the release level, its reduction from the run's start may reach the first step
+        # (C5.12.4) and beyond that grow at most at the ramp rate (C5.12.6) over any ramp_hold period, and between
+        # neighbouring nodes it falls at most at the ramp rate plus a share s of the first step:
+        #     D[m] >= min(D[0] - step, D[ref] - rate * hold),   ref = the run's earliest node within ramp_hold of m
+        #     D[m] >= D[m-1] - rate * dt - s[m],                 s >= 0, sum(s) <= step
+        # so the first step is held for ramp_hold, can't follow a ramp beyond the step, and is followed by a linear
+        # ramp. Below the release level D may drop straight into harvest. D may fall freely into exempt nodes
+        # (below the speed threshold, C5.12.7) and by up to extra_step more in first_step_350 windows (C5.12.4);
+        # the allowance used there (A, cumulative) can't exceed the actual drop. Times come from the first solve.
+        # Outside the runs (lifting, braking) the rules don't apply.
         for run in ramp_runs or []:
-            FLOOR = opti.variable(len(run))
+            nodes, ref = run["nodes"], run["ref"]
+            L = len(nodes)
+            D = opti.variable(L)   # Demand (units of POWER_SCALE, DC)
             release, step = ers.ramp_release / PS, ers.ramp_first_step / PS
-            for m, j in enumerate(run):
-                excess = U["P_DEPLOY"][j] / ETA_K - release
-                curve = deploy_power_limit(V[j], ers, smooth=self.CURVE_SMOOTHING) / PS - release
-                opti.subject_to(excess >= _smooth_min(FLOOR[m], curve, self.CURVE_SMOOTHING / PS))
-                opti.subject_to(FLOOR[m] >= excess - step)
-                if m > 0:
-                    i = run[m - 1]
-                    change = (FLOOR[m] - FLOOR[m - 1]) * 0.5 * (V[i] + V[j])
-                    opti.subject_to(change >= -ers.ramp_rate * self.ds / PS)
-            opti.set_initial(FLOOR, np.zeros(len(run)))
+            window_drop = ers.ramp_rate * ers.ramp_hold / PS
+            width = self.RAMP_SMOOTHING / PS
+            free = [m for m in range(1, L) if run["exempt"][m] or run["extra_step"][m] > 0]
+            a = opti.variable(len(free)) if free else None
+            allowance = {m: a[q] for q, m in enumerate(free)}
+            A = [0.0] * L          # Allowance used up to each node
+            for m in range(1, L):
+                A[m] = A[m - 1] + allowance.get(m, 0.0)
+            if free:
+                opti.subject_to(a >= 0)
+                capped = [allowance[m] for m in free if not run["exempt"][m]]
+                if capped:
+                    opti.subject_to(sum(capped) <= float(np.max(run["extra_step"])) / PS)
+                opti.set_initial(a, np.zeros(len(free)))
+            opti.subject_to(opti.bounded(-ers.max_recovery_power / PS, D, ers.max_deployment_power / PS))
+            S = opti.variable(L)   # Share of the first step used at each node (S[0] unused)
+            opti.subject_to(opti.bounded(0.0, S, step))
+            opti.subject_to(ca.sum1(S[1:]) <= step)
+            opti.set_initial(S, np.zeros(L))
+            for m, j in enumerate(nodes):
+                y = U["P_DEPLOY"][j] / ETA_K - U["P_HARVEST"][j] * ETA_K
+                if run["taper"][m]:
+                    curve = deploy_power_limit(V[j], ers, smooth=self.CURVE_SMOOTHING) / PS
+                    opti.subject_to(y <= D[m])
+                    opti.subject_to(y >= _smooth_min(D[m], curve, self.CURVE_SMOOTHING / PS))
+                else:
+                    opti.subject_to(y == D[m])
+                if m == 0:
+                    continue
+                opti.subject_to(D[m] <= D[m - 1])
+                if m in allowance:
+                    opti.subject_to(allowance[m] <= D[m - 1] - D[m])
+                q = int(ref[m])
+                first = D[0] - step - A[m]
+                held = D[q] - window_drop - (A[m] - A[q])
+                ramped = D[m - 1] - ers.ramp_rate / PS * float(run["dt"][m]) - S[m] - allowance.get(m, 0.0)
+                above = _smooth_max(D[m] - release, 0.0, width)
+                opti.subject_to(above >= _smooth_min(first, held, width) - release)
+                opti.subject_to(above >= ramped - release)
+            if warm is not None:
+                # From the previous solution's net power, made non-increasing
+                y0 = warm["U"]["P_DEPLOY"][nodes] / ETA_K - warm["U"]["P_HARVEST"][nodes] * ETA_K
+                opti.set_initial(D, np.minimum.accumulate(y0))
+            else:
+                opti.set_initial(D, np.zeros(L))
 
         # Velocity boundary condition. With a run-up, the lap starts at whatever speed the run-up gives.
         if r > 0:
@@ -626,7 +747,8 @@ class SpatialNLPSolver(BaseSolver):
         # SOLVE
         # =================================================================
 
-        self._configure_solver(opti)
+        # The ramp pass converges in fewer iterations with Ipopt's adaptive barrier update
+        self._configure_solver(opti, adaptive_mu=bool(ramp_runs))
 
         # Initial guess (SOL-8): the guessed speed profile with ERS off, which the car model can drive,
         # with the throttle and brakes it needs; tyres warm and wearing slowly
@@ -651,6 +773,17 @@ class SpatialNLPSolver(BaseSolver):
         if E_HI is not None:
             opti.set_initial(E_HI, soc_guess * ers.battery_capacity / 1e6)
             opti.set_initial(E_LO, soc_guess * ers.battery_capacity / 1e6 - ers.soc_window / 1e6)
+
+        if warm is not None:
+            for name in X:
+                opti.set_initial(X[name], warm["X"][name])
+            opti.set_initial(E_DEPLOY, warm["E_DEPLOY"])
+            opti.set_initial(E_RECOVER, warm["E_RECOVER"])
+            for u, values in ((U, warm["U"]), (U_MID, warm["U_MID"])):
+                for name in u:
+                    opti.set_initial(u[name], values[name])
+            if W_ZONE is not None:
+                opti.set_initial(W_ZONE, warm["W"][in_zone])
 
         variables = dict(X, E_DEPLOY=E_DEPLOY, E_RECOVER=E_RECOVER, U=U, U_MID=U_MID, W=W, run_up=r)
         if W_ZONE is None:
@@ -683,8 +816,8 @@ class SpatialNLPSolver(BaseSolver):
         brake = np.clip(-needed / veh.max_brake_force, 0.0, 1.0)
         return throttle, veh.brake_balance_front * brake, (1.0 - veh.brake_balance_front) * brake
 
-    def _configure_solver(self, opti):
-        """Configure NLP solver backend with appropriate options."""
+    def _configure_solver(self, opti, adaptive_mu: bool = False):
+        """Configure NLP solver backend with appropriate options (adaptive_mu: Ipopt's adaptive barrier update)."""
         backend = self._resolved_nlp_solver
 
         if backend == "fatrop":
@@ -710,6 +843,8 @@ class SpatialNLPSolver(BaseSolver):
                 # AMD ordering: MUMPS's default ordering segfaults on Apple Silicon.
                 # Set on every platform so macOS and Linux take the same iterations.
                 opts["ipopt.mumps_pivot_order"] = 0
+            if adaptive_mu:
+                opts["ipopt.mu_strategy"] = "adaptive"
             if self.ipopt_hessian_approximation == "limited-memory":
                 # Opt-in only: on this problem L-BFGS stops at "optimal" laps that are seconds too slow
                 opts["ipopt.hessian_approximation"] = "limited-memory"
@@ -742,6 +877,19 @@ class SpatialNLPSolver(BaseSolver):
         e_deploy_all = np.atleast_1d(sol.value(variables["E_DEPLOY"])) * 1e6   # J
         e_recover_all = np.atleast_1d(sol.value(variables["E_RECOVER"])) * 1e6
         v_opt, soc_opt = v_all[r:], soc_all[r:]
+        # The whole horizon (run-up included), for the ramp runs of a following solve and to start it from
+        values = lambda x: np.atleast_1d(np.asarray(sol.value(x), dtype=float).ravel())  # noqa: E731
+        W = variables["W"]
+        self._horizon = {
+            "v": v_all,
+            "throttle": values(variables["U"]["THROTTLE"]),
+            "X": {name: values(variables[name]) for name in ("V", "SOC", *TIRE_STATES) if name in variables},
+            "E_DEPLOY": values(variables["E_DEPLOY"]),
+            "E_RECOVER": values(variables["E_RECOVER"]),
+            "U": {name: values(x) for name, x in variables["U"].items()},
+            "U_MID": {name: values(x) for name, x in variables["U_MID"].items()},
+            "W": W if isinstance(W, np.ndarray) else values(W),
+        }
         e_deploy, e_recover = e_deploy_all[r:] - e_deploy_all[r], e_recover_all[r:] - e_recover_all[r]
 
         # Controls in physical units: power in W, brakes as fractions of max_brake_force

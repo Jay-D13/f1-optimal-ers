@@ -7,11 +7,13 @@ The track sweep solves every bundled track under both rule sets (~2 min):
 import os
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from config import get_ers_config, get_track_config, get_vehicle_config
+from config.events import RampWindow
 from models import F1TrackModel, VehicleDynamicsModel, find_tumftm_raceline
 from solvers import ForwardBackwardSolver, MultiLapSpatialNLPSolver, SolverError, SpatialNLPSolver
 from solvers.spatial_nlp import deploy_power_limit
@@ -113,16 +115,11 @@ class QualifyingRulesTests(unittest.TestCase):
         self.assertAlmostEqual(stored, moved, delta=1e3)  # J
 
     def test_ramp_down(self):
-        # Above 210 km/h at full throttle, the deploy never drops by more than the first step between nodes
-        # (C5.12.4); the deploy curve's own cuts (C5.2.8) are exempt
-        t, nodes = self.trajectory, self.trajectory.node_controls
-        deploy = nodes["P_deploy"] / self.ers.mgu_k_efficiency
-        limit = np.array([float(deploy_power_limit(v, self.ers)) for v in t.v_opt])
-        for k in range(len(deploy) - 1):
-            at_speed = min(t.v_opt[k], t.v_opt[k + 1]) > 215 / 3.6
-            full = min(nodes["throttle"][k], nodes["throttle"][k + 1]) > 0.999
-            if at_speed and full and deploy[k + 1] < limit[k + 1] - 5e3:
-                self.assertLessEqual(deploy[k] - deploy[k + 1], self.ers.ramp_first_step + 5e3, k)
+        # In each derate run at full throttle: no increase, the first step held, then the ramp rate (C5.12.4-6)
+        net, runs = _derate_runs(self.solver, self.trajectory)
+        self.assertTrue(runs)
+        step_drops, _ = _check_ramp_rules(self, net, self.trajectory.t_opt, runs, self.ers)
+        self.assertGreater(max(step_drops), self.ers.ramp_first_step - 15e3)   # Some run steps down fully
 
     def test_deploy_follows_the_curve(self):
         nodes = self.trajectory.node_controls
@@ -236,6 +233,177 @@ class ConstantRadiusTests(unittest.TestCase):
         )[0]
         np.testing.assert_allclose(trajectory.v_opt, v_corner, rtol=1e-4)
         self.assertAlmostEqual(trajectory.lap_time, track.total_length / v_corner, delta=1e-3)
+
+
+def _oval(straight: float = 1500.0, radius: float = 40.0, ds: float = 5.0) -> _Track:
+    """Two straights joined by hairpins, flat."""
+    radii = []
+    for length, r in ((straight, 1e5), (np.pi * radius, radius), (straight, 1e5), (np.pi * radius, radius)):
+        radii.extend([r] * int(round(length / ds)))
+    track = _Track(radius=1.0, length=len(radii) * ds, ds=ds)
+    track.track_data.radius = np.array(radii)
+    return track
+
+
+def _quali_solver(track, windows=(), drag_scale=1.0):
+    """The NLP solver for a synthetic track under 2026 qualifying rules (unknown event), with these ramp windows."""
+    ers = replace(get_ers_config("2026", session="qualifying"), ramp_windows=tuple(windows))
+    vehicle = get_vehicle_config("2026")
+    vehicle = replace(vehicle, c_w_a=vehicle.c_w_a * drag_scale)
+    solver = SpatialNLPSolver(VehicleDynamicsModel(vehicle, ers), track, ers, ds=5.0)
+    solver.verbose = False
+    return solver
+
+
+def _derate_runs(solver, trajectory):
+    """Net DC ERS-K power at the nodes (W), and each derate run inside the timed lap as (lap nodes, near the taper)."""
+    ers = solver.vehicle.ers
+    nodes = trajectory.node_controls
+    net = nodes["P_deploy"] / ers.mgu_k_efficiency - nodes["P_harvest"] * ers.mgu_k_efficiency
+    r = int(round(trajectory.run_up["distance"] / solver.ds)) if trajectory.run_up else 0
+    runs = []
+    for run in solver.ramp_runs:
+        keep = run["nodes"] >= r
+        runs.append((run["nodes"][keep] - r, run["taper"][keep]))
+    return net, [run for run in runs if len(run[0]) > 1]
+
+
+def _check_ramp_rules(test, net, t, runs, ers, tol=15e3):
+    """
+    Assert the ramp-down rules in each derate run (tolerance tol W for the rounded corners): the net power never
+    rises (C5.12.5) away from the deploy curve's taper, and there, while it is above the release level, its reduction
+    from the run's start stays within the first step or its drop over the last ramp_hold (less a node) within the
+    ramp rate (C5.12.4, C5.12.6). Returns the reductions from the start, and those 1 s drops beyond the first step.
+    """
+    step_drops, ramp_drops = [], []
+    for lap_nodes, cut in runs:
+        y, tr = net[lap_nodes], t[lap_nodes]
+        for k in range(1, len(y)):
+            if not (cut[k] or cut[k - 1]):
+                test.assertLessEqual(y[k], y[k - 1] + 2e3, lap_nodes[k])
+        for m in range(len(y)):
+            if y[m] <= ers.ramp_release + tol or cut[m]:
+                continue   # Released, or where the deploy curve may hold the ERS-K below the demand
+            # The NLP takes its 1 s windows from the first solve's times, which may differ here by a node
+            j = int(np.searchsorted(tr, tr[m] - ers.ramp_hold + 0.1))
+            lower = min(y[0] - ers.ramp_first_step, y[j] - ers.ramp_rate * ers.ramp_hold)
+            test.assertGreaterEqual(y[m], lower - tol, lap_nodes[m])
+            step_drops.append(y[0] - y[m])
+            if y[0] - y[m] > ers.ramp_first_step + tol:
+                ramp_drops.append(y[j] - y[m])
+    return step_drops, ramp_drops
+
+
+class RampRunTests(unittest.TestCase):
+    """Where the ramp-down rules apply (C5.12.4-8): the derate runs found from a solution's speed and throttle."""
+
+    def runs(self, v_kph, throttle, windows=()):
+        solver = _quali_solver(_Track(radius=1e5, length=5.0 * (len(v_kph) - 1)), windows)
+        solver._horizon = {"v": np.asarray(v_kph, float) / 3.6, "throttle": np.asarray(throttle, float)}
+        return solver._full_throttle_runs(run_up=0)
+
+    def test_trigger_hold_and_threshold(self):
+        # 252 km/h = 70 m/s: one node every 1/14 s. Full throttle from node 10 to 200.
+        v = np.full(301, 252.0)
+        v[:30] = 200.0                                     # Below 210 km/h until node 30
+        throttle = np.where((np.arange(301) >= 10) & (np.arange(301) <= 200), 1.0, 0.5)
+        (run,) = self.runs(v, throttle)
+        self.assertEqual(run["nodes"][0], 30)              # Triggered 1 s after node 10 (node 24), then above 210 km/h
+        self.assertEqual(run["nodes"][-1], 200)
+        # The hold window: each node's reference is the earliest node at most 1 s before it, in the run
+        m = 50
+        self.assertEqual(run["ref"][m], m - 14)
+        self.assertEqual(run["ref"][5], 0)
+        self.assertFalse(run["exempt"].any())
+        self.assertFalse((run["extra_step"] > 0).any())
+
+    def test_windows(self):
+        v = np.full(301, 252.0)
+        throttle = np.ones(301)
+        windows = (
+            RampWindow("reset", 600, 700),                 # Nodes 120-140 split the run
+            RampWindow("speed_threshold", 300, 400, 270),  # 252 km/h is below it: free drops at nodes 60-80
+            RampWindow("first_step_350", 1000, 1100, 350),
+        )
+        first, second = self.runs(v, throttle, windows)
+        self.assertEqual((first["nodes"][0], first["nodes"][-1]), (14, 119))
+        self.assertEqual((second["nodes"][0], second["nodes"][-1]), (141, 300))   # No new trigger after a reset
+        exempt = first["nodes"][first["exempt"]]
+        self.assertEqual((exempt[0], exempt[-1]), (60, 80))
+        extra = second["nodes"][second["extra_step"] > 0]
+        self.assertEqual((extra[0], extra[-1]), (200, 220))
+        self.assertAlmostEqual(second["extra_step"].max(), 200e3)
+
+    def test_qualifying_only_windows(self):
+        quali = get_ers_config("2026", session="qualifying", event="Sepang").ramp_windows
+        practice = get_ers_config("2026", session="practice", event="Sepang").ramp_windows
+        self.assertEqual(len(quali), 10)
+        self.assertEqual(len(practice), 8)                  # Exit T15 first step and reset are SQ and Q only
+        self.assertEqual(get_ers_config("2026", session="qualifying", event="Monza").ramp_windows, ())
+
+
+class RampRuleTests(unittest.TestCase):
+    """
+    The ramp-down rules on a synthetic oval with two 1.5 km straights (drag doubled, so the car stays below the
+    deploy curve's taper): each straight ends in a derate, and each rule binds.
+    """
+
+    @staticmethod
+    def solve(windows=()):
+        solver = _quali_solver(_oval(), windows, drag_scale=2.0)
+        trajectory = solver.solve()
+        net, runs = _derate_runs(solver, trajectory)
+        return solver, trajectory, net, runs
+
+    @classmethod
+    def setUpClass(cls):
+        cls.solver, cls.trajectory, cls.net, cls.runs = cls.solve()
+
+    @staticmethod
+    def largest_drop(net, runs, above=125e3):
+        """The largest drop between neighbouring run nodes that starts above `above` (W), and its node."""
+        best, where = 0.0, None
+        for lap_nodes, _ in runs:
+            for a, b in zip(lap_nodes[:-1], lap_nodes[1:]):
+                if net[a] > above and net[a] - net[b] > best:
+                    best, where = net[a] - net[b], b
+        return best, where
+
+    def test_step_hold_ramp_harvest(self):
+        t, net, ers = self.trajectory.t_opt, self.net, self.solver.vehicle.ers
+        self.assertEqual(self.trajectory.solver_status, "optimal")
+        self.assertEqual(len(self.runs), 2)
+        tol = 15e3  # The rules' corners are rounded over RAMP_SMOOTHING
+        step_drops, ramp_drops = _check_ramp_rules(self, net, t, self.runs, ers, tol)
+        # The first step and the ramp rate bind
+        self.assertGreater(max(step_drops), ers.ramp_first_step - tol)
+        self.assertGreater(max(ramp_drops), 0.8 * ers.ramp_rate * ers.ramp_hold)
+        # Below the release level the ERS-K drops straight into super-clip harvest at full throttle
+        self.assertLess(net.min(), -300e3)
+        (first, _), (second, _) = self.runs
+        self.assertLess(net[first].min(), -300e3)
+        throttle = self.trajectory.node_controls["throttle"]
+        self.assertGreater(throttle[first][np.argmin(net[first])], 0.99)
+        # The largest drop that starts above the release level is the first step, not a shortcut of the ramp
+        drop, _ = self.largest_drop(net, self.runs)
+        self.assertLess(drop, ers.ramp_first_step)
+
+    def test_first_step_window(self):
+        # A 350 kW first-step window (C5.12.4) late on the first straight: the derate cuts more than a first step
+        # in one go there, and the lap is no slower
+        solver, trajectory, net, runs = self.solve((RampWindow("first_step_350", 700, 1300, 350),))
+        drop, node = self.largest_drop(net, runs)
+        self.assertGreater(drop, 100e3)
+        self.assertTrue(700 <= trajectory.s[node] <= 1300)
+        self.assertLessEqual(trajectory.lap_time, self.trajectory.lap_time + 1e-3)
+
+    def test_speed_threshold_window(self):
+        # A 400 km/h threshold (C5.12.7) over the end of the first straight: there the ERS-K may drop freely
+        solver, trajectory, net, runs = self.solve((RampWindow("speed_threshold", 850, 1450, 400),))
+        drop, node = self.largest_drop(net, runs)
+        self.assertGreater(drop, 100e3)
+        self.assertTrue(850 <= trajectory.s[node] <= 1450)
+        self.assertLessEqual(trajectory.lap_time, self.trajectory.lap_time + 1e-3)
 
 
 class MultiLapTests(unittest.TestCase):

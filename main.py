@@ -21,6 +21,7 @@ from config import (
     get_tire_compound_config,
     get_track_config,
     get_vehicle_config,
+    track_raceline,
     get_ers_config,
 )
 from config.app_config import AppConfig, app
@@ -168,7 +169,7 @@ def main(args):
     ers_config = get_ers_config(args.regulations, session=args.session, event=args.event or args.track)
     
     # Vehicle config (track-specific)
-    vehicle_config = get_vehicle_config(args.regulations, base=get_track_config(args.track))
+    vehicle_config = get_vehicle_config(args.regulations, base=get_track_config(args.track, args.year))
     
     print(f"\nTrack: {args.track}")
     print(f"ERS Config: {ers_config.max_deployment_power/1000:.0f}kW deploy ({ers_config.deploy_curve} curve), "
@@ -220,7 +221,8 @@ def main(args):
     
     # With --use-tumftm, the TUMFTM raceline placed on the FastF1 session (height, timing line, Straight Mode
     # zones), or on its own if the session can't be loaded or its layout has changed; otherwise the FastF1 line
-    tumftm_path = find_tumftm_raceline(args.track)
+    raceline = track_raceline(args.track, args.year)
+    tumftm_path = find_tumftm_raceline(raceline) if raceline else None
     
     if tumftm_path is not None and args.use_tumftm:
         print(f"   Loading TUMFTM raceline: {tumftm_path}")
@@ -472,7 +474,8 @@ def main(args):
         print("\n Offline Solution...")
         fig_offline = plot_offline_solution(
             optimal_trajectory,
-            title=f"{args.track} - Offline Optimal Solution ({args.collocation}, {n_laps} lap(s))"
+            title=f"{args.track} - Offline Optimal Solution ({args.collocation}, {n_laps} lap(s))",
+            ers_config=ers_config,
         )
         run_manager.save_plot(fig_offline, '02_offline_solution')
         plt.close(fig_offline)
@@ -485,7 +488,8 @@ def main(args):
                 velocity_profile_no_ers.v,
                 velocity_profile_with_ers.v,
                 optimal_trajectory,
-                args.track
+                args.track,
+                ers_config=ers_config,
             )
             run_manager.save_plot(fig_comparison, '03_ers_comparison')
             plt.close(fig_comparison)
@@ -496,7 +500,8 @@ def main(args):
                 optimal_trajectory,
                 velocity_profile_no_ers,
                 track,
-                args.track
+                args.track,
+                ers_config=ers_config,
             )
             run_manager.save_plot(fig_simple, '04_simple_results')
             plt.close(fig_simple)

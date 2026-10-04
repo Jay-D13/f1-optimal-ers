@@ -28,13 +28,16 @@ class Parameter:
 
 # Shared by every track (decision D2: one generic pole car). Bounds are physical ranges: when a fit ends on one,
 # the model is missing something rather than the car being extreme.
+# CdA: telemetry fits and CFD put Corner Mode at 0.905-0.97 m² (REFERENCE §2). ICE: public estimates for the
+# Mercedes-powered pole cars are 400-430 kW, about 420 kW on the dyno (REFERENCE §1); the earlier 330-430 kW range
+# let the fit trade ICE power against drag (BUGS CAL-1).
 PARAMETERS = (
-    Parameter("c_w_a", 0.95, 0.7, 1.3, "Corner Mode drag area CdA (m²)"),
+    Parameter("c_w_a", 0.95, 0.85, 1.05, "Corner Mode drag area CdA (m²)"),
     Parameter("c_z_a", 3.45, 2.5, 5.5, "Corner Mode downforce area ClA (m²)"),
     Parameter("front_downforce_share", 0.451, 0.38, 0.52, "Share of the downforce on the front axle"),
     Parameter("straight_mode_drag_factor", 0.80, 0.6, 0.95, "Straight Mode drag / Corner Mode drag"),
     Parameter("mu_scale", 1.0, 0.8, 1.3, "Scale on every tyre friction coefficient"),
-    Parameter("pow_max_ice", 400e3, 330e3, 430e3, "ICE power (W); confounded with drag on the straights"),
+    Parameter("pow_max_ice", 420e3, 380e3, 440e3, "ICE power (W); confounded with drag on the straights"),
 )
 
 

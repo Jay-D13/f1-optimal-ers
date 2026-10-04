@@ -7,6 +7,10 @@ need 6–7 g there. The bound caps the curvature so that the speeds seen in thos
 G_MAX. The high-percentile speeds it uses are an envelope over many laps, faster in every bin than any one lap,
 so they only bound the path: the aero level is fitted to one real lap, solved with its session's energy rules.
 Neither uses the qualifying session, so a held-out round stays a prediction.
+
+Two ways out of TRK-11: the wide racelines (models/raceline.py, data/racelines_wide), which bring the fast
+corners down to the lateral g the 2026 cars plausibly reach, or this bound with G_MAX lowered to the grip they show
+under braking (lateral_g_max: Brembo's 3.8–3.9 g peaks at 313–318 km/h give about 3.7 g of lateral grip).
 """
 import logging
 import pickle
@@ -26,13 +30,19 @@ PERCENTILE = 90.0                        # Speed kept per bin, over the pooled s
 MIN_SAMPLES = 3                          # Bins with fewer samples are interpolated from their neighbours
 G_MAX = 5.0                              # (g) Largest lateral acceleration the bound allows at those speeds
 
+# Brembo's 2026 braking peaks with their entry speeds (REFERENCE_2026 §5): name → (g, km/h)
+BREMBO_PEAKS = {"Monza T1": (3.8, 318.0), "Baku T1": (3.9, 313.0)}
 
-def practice_speed(round_number: int, track, refresh: bool = False) -> np.ndarray:
+
+def practice_speed(round_number: int, track, refresh: bool = False, year: int = 2026,
+                   sessions=SESSIONS) -> np.ndarray:
     """
     High-percentile speed (m/s) at each point of the track's grid, from the clean laps of the sessions before
-    qualifying. Cached in data/cache/calibration.
+    qualifying (those of `sessions` the event has). Cached in data/cache/calibration per path: the file name
+    carries the path's length, so a TUM line and a wide line (models/raceline.py) never share a cache.
     """
-    path = CACHE / f"R{round_number:02d}_practice_speed.pkl"
+    prefix = "" if year == 2026 else f"{year}_"
+    path = CACHE / f"{prefix}R{round_number:02d}_practice_speed_{track.total_length:.1f}m_ds{track.ds:g}.pkl"
     if path.exists() and not refresh:
         with open(path, "rb") as f:
             cached = pickle.load(f)
@@ -42,9 +52,9 @@ def practice_speed(round_number: int, track, refresh: bool = False) -> np.ndarra
     logging.getLogger("fastf1").setLevel(logging.ERROR)
     length = track.total_length
     distances, speeds = [], []
-    for name in SESSIONS:
+    for name in sessions:
         try:
-            session, _, _ = load_session(2026, round_number, name)
+            session, _, _ = load_session(year, round_number, name)
         except Exception:
             continue                      # The event doesn't have this session
         for _, lap in clean_laps(session).iterrows():
@@ -94,6 +104,28 @@ def bound_curvature(track, speed: np.ndarray, g_max: float = G_MAX) -> np.ndarra
     td.curvature = td.curvature * kept
     td.radius = np.clip(1.0 / (np.abs(td.curvature) + 1e-6), 10, 10000)
     return kept
+
+
+def needed_g(track, speed: np.ndarray) -> np.ndarray:
+    """Lateral acceleration (g) that the speeds (m/s, on the track's grid) need on the track's path: v²·|κ| / g."""
+    return np.asarray(speed, dtype=float) ** 2 * np.abs(track.track_data.curvature) / 9.81
+
+
+def lateral_g_max(peak_braking_g: float, speed_kph: float, vehicle=None, tires=None) -> float:
+    """
+    Lateral acceleration (g) the tyres give at the speed of a measured braking peak: the peak less the share of
+    the Corner Mode drag (which a cornering car doesn't get), times the tyres' lateral-to-longitudinal friction
+    ratio. A G_MAX for bound_curvature that matches the grip the 2026 cars show under braking.
+    """
+    from config import get_vehicle_config
+    from config.vehicle import TireParameters
+
+    vehicle = vehicle or get_vehicle_config("2026")
+    tires = tires or TireParameters()
+    v = speed_kph / 3.6
+    drag_g = 0.5 * vehicle.rho_air * vehicle.c_w_a * v**2 / ((vehicle.mass + vehicle.fuel_mass) * 9.81)
+    ratio = (tires.muy_f + tires.muy_r) / (tires.mux_f + tires.mux_r)
+    return float((peak_braking_g - drag_g) * ratio)
 
 
 def session_air_density(session):

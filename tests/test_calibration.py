@@ -28,7 +28,7 @@ def circle_track(radius=500.0, ds=5.0):
 class DatasetTests(unittest.TestCase):
     def test_good_rounds_have_racelines(self):
         rounds = good_rounds()
-        self.assertEqual(sorted(rounds), [2, 3, 5, 8, 9, 10, 11, 13])
+        self.assertEqual(sorted(rounds), [2, 3, 5, 8, 9, 10, 11, 13, 16])   # Sepang (R16) joined on 2026-10-01
 
     def test_lap_distances_run_through_the_line_and_skip_strays(self):
         track = circle_track()
@@ -91,8 +91,11 @@ class FitTests(unittest.TestCase):
         x = fit.x_of(fit.fixed)
         self.assertTrue(np.all((x > 0) & (x < 1)))
         values = fit.params(np.array([0.25, 0.75]))
-        self.assertAlmostEqual(values["c_w_a"], 0.7 + 0.25 * 0.6)
-        self.assertAlmostEqual(values["mu_scale"], 0.8 + 0.75 * 0.5)
+        bounds = {p.name: (p.lower, p.upper) for p in PARAMETERS}
+        lo, hi = bounds["c_w_a"]
+        self.assertAlmostEqual(values["c_w_a"], lo + 0.25 * (hi - lo))
+        lo, hi = bounds["mu_scale"]
+        self.assertAlmostEqual(values["mu_scale"], lo + 0.75 * (hi - lo))
         self.assertAlmostEqual(values["c_z_a"], 3.45)                # Not fitted: start value
 
 

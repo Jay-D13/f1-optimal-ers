@@ -4,6 +4,8 @@ Supports:
 2. TUMFTM minimum curvature racelines
 3. A fitted TrackGeometry (models/geometry.py)
 """
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -64,12 +66,43 @@ class TrackData:
     vertical_curvature: Optional[np.ndarray] = None   # d(gradient)/ds (1/m); None on flat loaders
 
 
-def find_tumftm_raceline(track: str, directory: str | Path = "data/racelines") -> Optional[Path]:
-    """Bundled TUMFTM raceline for a track name. File names are matched case-insensitively (Linux disks are case-sensitive)."""
+_DATA = Path(__file__).resolve().parents[1] / "data"
+
+# Raceline sets: TUM's minimum-curvature lines, and the lines recomputed in TUM's corridors widened by 1 m per side
+# for the kerbs (models/raceline.py; the 2026 pole speeds need at most about 4.5 g on them, TRK-11)
+RACELINE_SETS = {"tum": _DATA / "racelines", "wide": _DATA / "racelines_wide"}
+DEFAULT_RACELINE_SET = "tum"
+RACELINE_ENV = "F1_RACELINE"   # Environment variable that picks the set when none is given (tum or wide)
+
+
+def raceline_set() -> str:
+    """The raceline set in use: the F1_RACELINE environment variable, else DEFAULT_RACELINE_SET."""
+    name = os.environ.get(RACELINE_ENV, "").strip().lower() or DEFAULT_RACELINE_SET
+    if name not in RACELINE_SETS:
+        raise ValueError(f"{RACELINE_ENV}={name!r}: expected one of {', '.join(RACELINE_SETS)}")
+    return name
+
+
+def find_tumftm_raceline(track: str, directory: str | Path | None = None, variant: Optional[str] = None) -> Optional[Path]:
+    """
+    Bundled raceline for a track name, from `directory` or else from the raceline set `variant` ('tum' or 'wide';
+    default: raceline_set(), so `F1_RACELINE=wide` makes --use-tumftm use the wide lines). File names are matched
+    case-insensitively (Linux disks are case-sensitive).
+    """
+    if directory is None:
+        directory = RACELINE_SETS[variant.lower() if variant else raceline_set()]
     for path in sorted(Path(directory).glob("*.csv")):
         if path.stem.lower() == track.lower():
             return path
     return None
+
+
+def tum_sibling(raceline: str | Path) -> Optional[Path]:
+    """For a wide raceline file (data/racelines_wide), the TUM raceline it was built from; else None."""
+    path = Path(raceline).resolve()
+    if path.parent != RACELINE_SETS["wide"].resolve():
+        return None
+    return find_tumftm_raceline(path.stem, variant="tum")
 
 
 class F1TrackModel:
@@ -234,11 +267,21 @@ class F1TrackModel:
         if raceline is not None:
             xy = np.loadtxt(raceline, delimiter=',', comments='#')[:, :2]
             placed, gap = place_raceline(xy, geometry, source=f"{Path(raceline).name} on {geometry.source}")
-            if gap > MAX_RACELINE_GAP:
+            # A wide line (models/raceline.py) is built from TUM's data, so the layout check is TUM's own line:
+            # the wide line itself may sit further from the map line where the track is wide (Austin T1: 17 m)
+            sibling = tum_sibling(raceline)
+            if sibling is not None:
+                tum_xy = np.loadtxt(sibling, delimiter=',', comments='#')[:, :2]
+                _, layout_gap = place_raceline(tum_xy, geometry)
+            else:
+                layout_gap = gap
+            if layout_gap > MAX_RACELINE_GAP:
                 raise ValueError(
-                    f"{raceline} is up to {gap:.0f} m from the {self.year} layout: the circuit has changed since"
+                    f"{sibling or raceline} is up to {layout_gap:.0f} m from the {self.year} layout: the circuit "
+                    f"has changed since"
                 )
-            print(f"   Raceline {Path(raceline).name} placed on the session (largest gap {gap:.1f} m)")
+            print(f"   Raceline {Path(raceline).name} placed on the session (largest gap {gap:.1f} m"
+                  + (f", TUM line {layout_gap:.1f} m)" if sibling is not None else ")"))
             geometry = placed
             self.data_source = 'tumftm+fastf1'
         self.load_from_geometry(geometry)
